@@ -73,6 +73,59 @@ mod tests {
     }
 
     #[test]
+    fn test_thinking_replay_as_content_block_when_compat_enabled() {
+        let messages = vec![
+            Message::new(Role::User, vec![ContentBlock::Text { text: "q1".into() }]),
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Thinking {
+                        thinking: "private chain".into(),
+                        signature: None,
+                    },
+                    ContentBlock::Text {
+                        text: "first answer".into(),
+                    },
+                ],
+            ),
+        ];
+
+        let compat = openai_compat().with_thinking_replay_as_content_block();
+        let result = build_messages(&messages, "", &compat);
+        let assistant_msgs: Vec<_> = result.iter().filter(|m| m["role"] == "assistant").collect();
+
+        assert_eq!(assistant_msgs.len(), 1);
+        assert!(
+            assistant_msgs[0].get("reasoning_content").is_none(),
+            "content-block replay must not also set reasoning_content"
+        );
+        let content = assistant_msgs[0]["content"].as_array().expect("content must be an array");
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "private chain");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "first answer");
+    }
+
+    #[test]
+    fn test_thinking_replay_as_content_block_omits_text_block_when_no_text() {
+        let messages = vec![Message::new(
+            Role::Assistant,
+            vec![ContentBlock::Thinking {
+                thinking: "chain only".into(),
+                signature: None,
+            }],
+        )];
+
+        let compat = openai_compat().with_thinking_replay_as_content_block();
+        let result = build_messages(&messages, "", &compat);
+        let assistant_msgs: Vec<_> = result.iter().filter(|m| m["role"] == "assistant").collect();
+
+        let content = assistant_msgs[0]["content"].as_array().expect("content must be an array");
+        assert_eq!(content.len(), 1, "no text/downgrade lines means no trailing text block");
+        assert_eq!(content[0]["type"], "thinking");
+    }
+
+    #[test]
     fn test_reasoning_content_merge_drops_empty_replay_values() {
         let mut messages = vec![
             json!({

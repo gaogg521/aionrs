@@ -202,6 +202,11 @@ impl OpenAiProjector {
             }
         }
 
+        // Only declare thinking mode when the caller explicitly asked for it
+        // (matches upstream iOfficeAI/aionrs #203). Auto-forcing it for every
+        // reasoning-capable provider would put conversations into a stricter
+        // thinking-replay contract most OpenAI-compatible gateways cannot
+        // satisfy on follow-up turns.
         if let Some(thinking) = &request.thinking {
             match thinking {
                 ThinkingConfig::Enabled { .. } => {

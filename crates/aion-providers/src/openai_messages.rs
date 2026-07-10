@@ -102,7 +102,11 @@ pub(crate) fn build_messages(messages: &[Message], system: &str, compat: &Provid
                     .collect::<Vec<_>>()
                     .join("");
 
-                if !thinking.is_empty() {
+                let omit_thinking_replay = !thinking.is_empty() && compat.omit_thinking_replay();
+                let replay_thinking_as_content_block = !thinking.is_empty()
+                    && !omit_thinking_replay
+                    && compat.thinking_replay_as_content_block();
+                if !thinking.is_empty() && !replay_thinking_as_content_block && !omit_thinking_replay {
                     msg_json["reasoning_content"] = json!(thinking);
                 }
 
@@ -189,7 +193,13 @@ pub(crate) fn build_messages(messages: &[Message], system: &str, compat: &Provid
                 content_parts.extend(dropped_lines);
                 let combined = content_parts.join("\n\n");
 
-                if !combined.is_empty() {
+                if replay_thinking_as_content_block {
+                    let mut blocks: Vec<Value> = vec![json!({ "type": "thinking", "thinking": thinking })];
+                    if !combined.is_empty() {
+                        blocks.push(json!({ "type": "text", "text": combined }));
+                    }
+                    msg_json["content"] = json!(blocks);
+                } else if !combined.is_empty() {
                     msg_json["content"] = json!(combined);
                 } else if tool_calls.is_empty() {
                     msg_json["content"] = json!("");

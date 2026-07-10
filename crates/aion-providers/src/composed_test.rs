@@ -49,6 +49,36 @@ mod tests {
     }
 
     #[test]
+    fn openai_projection_omits_thinking_field_when_not_explicitly_requested() {
+        // supports_thinking is a UI capability-exposure flag only; it must
+        // not by itself cause the OpenAI-protocol path to declare thinking
+        // mode. Auto-forcing this broke gateways that treat a declared
+        // `thinking.type=enabled` as a strict replay contract they can't
+        // satisfy on follow-up turns (see compat.rs comment on
+        // `openai_defaults()` for the upstream issue this matches).
+        let compat = ProviderCompat::openai_defaults();
+        assert!(!compat.supports_thinking(), "openai_defaults() should not force thinking on by default");
+        let provider = openai_provider(compat);
+        let mut req = test_request();
+        req.thinking = None;
+        let body = provider
+            .build_request_body(&req)
+            .expect("request body projection should succeed");
+        assert!(body.get("thinking").is_none(), "body was: {body}");
+    }
+
+    #[test]
+    fn openai_projection_sends_thinking_enabled_when_explicitly_requested() {
+        let provider = openai_provider(ProviderCompat::openai_defaults());
+        let mut req = test_request();
+        req.thinking = Some(aion_types::llm::ThinkingConfig::Enabled { budget_tokens: 8000 });
+        let body = provider
+            .build_request_body(&req)
+            .expect("request body projection should succeed");
+        assert_eq!(body["thinking"]["type"], "enabled", "body was: {body}");
+    }
+
+    #[test]
     fn test_max_tokens_field_default() {
         let provider = openai_provider(ProviderCompat::openai_defaults());
         let req = LlmRequest {
@@ -356,5 +386,84 @@ mod tests {
             rx.recv().await,
             Some(LlmEvent::TextDelta(text)) if text == "hi"
         ));
+    }
+
+    #[tokio::test]
+    async fn composed_provider_retries_with_content_block_thinking_on_gateway_rejection() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_raw(
+                r#"{"error":{"message":"backend error: status=400 body={\"error\":{\"message\":\"The `content[].thinking` in the thinking mode must be passed back to the API.\"}}"}}"#,
+                "application/json",
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+                "text/event-stream",
+            ))
+            .mount(&server)
+            .await;
+
+        let compat = ProviderCompat::openai_defaults();
+        let provider = ComposedProvider::new(
+            ProviderTransport::OpenAi(OpenAiTransport::new("test-key", &server.uri())),
+            compat,
+        );
+
+        let request = golden_req(
+            vec![
+                Message::new(Role::User, vec![ContentBlock::Text { text: "q1".to_string() }]),
+                Message::new(
+                    Role::Assistant,
+                    vec![
+                        ContentBlock::Thinking {
+                            thinking: "reasoning...".to_string(),
+                            signature: None,
+                        },
+                        ContentBlock::Text {
+                            text: "answer".to_string(),
+                        },
+                    ],
+                ),
+                Message::new(Role::User, vec![ContentBlock::Text { text: "q2".to_string() }]),
+            ],
+            vec![],
+        );
+
+        let mut rx = provider.stream(&request).await.expect("stream should succeed after one retry");
+        assert!(matches!(
+            rx.recv().await,
+            Some(LlmEvent::TextDelta(text)) if text == "ok"
+        ));
+
+        let received = server.received_requests().await.expect("wiremock records requests");
+        assert_eq!(received.len(), 2, "should send the original request then exactly one retry");
+
+        let retried_body: serde_json::Value = received[1].body_json().expect("retry body is valid json");
+        let assistant_msg = retried_body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("retried request still carries the assistant history");
+        assert!(
+            assistant_msg.get("reasoning_content").is_none(),
+            "retry must not send reasoning_content"
+        );
+        let content = assistant_msg["content"]
+            .as_array()
+            .expect("retry must replay thinking as a content[] array");
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "reasoning...");
     }
 }

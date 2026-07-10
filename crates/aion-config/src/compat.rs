@@ -137,6 +137,27 @@ pub struct ReasoningCompat {
     /// Available effort levels for this provider.
     /// Only meaningful when supports_effort is true.
     pub effort_levels: Option<Vec<String>>,
+
+    /// Replay historical thinking as an Anthropic-style `content[]` array
+    /// block (`{"type":"thinking","thinking":"..."}`) instead of the flat
+    /// OpenAI/DeepSeek-style `reasoning_content` string field.
+    ///
+    /// Some OpenAI-protocol gateways front a thinking-capable model through
+    /// an Anthropic-shaped validation layer and reject `reasoning_content`
+    /// as "thinking not passed back" even though it *was* sent. Default:
+    /// false (use `reasoning_content`) everywhere; the OpenAI transport
+    /// flips this on for a single retry when it observes that exact
+    /// rejection (see `composed.rs`).
+    pub thinking_replay_as_content_block: Option<bool>,
+
+    /// Omit historical thinking/reasoning content from the replayed request
+    /// entirely (send neither `reasoning_content` nor a `content[].thinking`
+    /// block). Last-resort fallback for gateways that reject *any* replay
+    /// shape because they require a cryptographic signature the
+    /// OpenAI-protocol streaming endpoint never hands the client — there is
+    /// no shape a client can send that satisfies that gateway, so dropping
+    /// the claim entirely is the only remaining option. Default: false.
+    pub omit_thinking_replay: Option<bool>,
 }
 
 impl TransportCompat {
@@ -194,6 +215,10 @@ impl ReasoningCompat {
             supports_thinking: user.supports_thinking.or(defaults.supports_thinking),
             supports_effort: user.supports_effort.or(defaults.supports_effort),
             effort_levels: user.effort_levels.or(defaults.effort_levels),
+            thinking_replay_as_content_block: user
+                .thinking_replay_as_content_block
+                .or(defaults.thinking_replay_as_content_block),
+            omit_thinking_replay: user.omit_thinking_replay.or(defaults.omit_thinking_replay),
         }
     }
 }
@@ -280,9 +305,14 @@ impl ProviderCompat {
                 ..Default::default()
             },
             reasoning: ReasoningCompat {
+                // `supports_thinking` is a capability-exposure flag for the
+                // host UI only; `thinking.type=enabled` stays opt-in and is
+                // sent solely when the caller sets `request.thinking` (see
+                // projector.rs, aligned with upstream #203).
                 supports_thinking: Some(false),
                 supports_effort: Some(true),
                 effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
+                ..Default::default()
             },
             ..Default::default()
         }
@@ -389,6 +419,32 @@ impl ProviderCompat {
 
     pub fn effort_levels(&self) -> &[String] {
         self.reasoning.effort_levels.as_deref().unwrap_or(&[])
+    }
+
+    pub fn thinking_replay_as_content_block(&self) -> bool {
+        self.reasoning.thinking_replay_as_content_block.unwrap_or(false)
+    }
+
+    /// Return a copy of this compat with `thinking_replay_as_content_block`
+    /// forced on. Used for the single automatic retry in `composed.rs`.
+    pub fn with_thinking_replay_as_content_block(&self) -> Self {
+        let mut next = self.clone();
+        next.reasoning.thinking_replay_as_content_block = Some(true);
+        next
+    }
+
+    pub fn omit_thinking_replay(&self) -> bool {
+        self.reasoning.omit_thinking_replay.unwrap_or(false)
+    }
+
+    /// Return a copy of this compat with thinking replay omitted entirely.
+    /// Used for the second automatic retry in `composed.rs`, after the
+    /// content-block retry also fails.
+    pub fn with_thinking_replay_omitted(&self) -> Self {
+        let mut next = self.clone();
+        next.reasoning.thinking_replay_as_content_block = Some(false);
+        next.reasoning.omit_thinking_replay = Some(true);
+        next
     }
 }
 
