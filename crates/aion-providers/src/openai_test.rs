@@ -146,6 +146,69 @@ mod tests {
         assert!(state.tool_calls.is_empty(), "tool calls should be drained");
     }
 
+    #[test]
+    fn tool_call_placeholder_empty_object_then_streamed_args() {
+        // Regression: some OpenAI-compatible gateways (LiteLLM fronting
+        // DeepSeek/Kimi reasoning models) emit a complete placeholder "{}" in
+        // the first tool_call delta, then stream the real arguments char-by-char
+        // in later deltas. Naive concatenation yields `{}{"skill":"..."}` which
+        // is invalid JSON and was being silently downgraded to empty params,
+        // causing the tool to fail with "missing field". The parser must discard
+        // the placeholder and end up with the real arguments.
+        let mut state = StreamState::new();
+
+        // delta 1: id + name + a COMPLETE placeholder object "{}"
+        let c1 = r#"{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_00","type":"function","function":{"name":"Skill","arguments":"{}"}}]},"index":0}]}"#;
+        parse_sse_chunk(c1, &mut state, false);
+
+        // deltas 2..: the real arguments streamed in fragments
+        for frag in [
+            "{", "\"", "skill", "\"", ": ", "\"", "office", "cli", "-d", "oc", "x", "\"", "}",
+        ] {
+            let chunk = format!(
+                r#"{{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"function":{{"arguments":"{}"}}}}]}},"index":0}}]}}"#,
+                frag.replace('"', "\\\"")
+            );
+            parse_sse_chunk(&chunk, &mut state, false);
+        }
+
+        let finish = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]}"#;
+        let events = parse_sse_chunk(finish, &mut state, false);
+
+        let tool = events
+            .iter()
+            .find_map(|e| match e {
+                LlmEvent::ToolUse { name, input, .. } => Some((name.clone(), input.clone())),
+                _ => None,
+            })
+            .expect("a ToolUse event must be emitted");
+        assert_eq!(tool.0, "Skill");
+        assert_eq!(
+            tool.1["skill"], "officecli-docx",
+            "placeholder {{}} must be discarded and real args parsed, got: {}",
+            tool.1
+        );
+    }
+
+    #[test]
+    fn tool_call_genuine_empty_object_preserved() {
+        // A tool with no parameters legitimately sends a single "{}" and nothing
+        // more. That must be preserved as an empty object, not corrupted.
+        let mut state = StreamState::new();
+        let c1 = r#"{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_np","type":"function","function":{"name":"NoParams","arguments":"{}"}}]},"index":0}]}"#;
+        parse_sse_chunk(c1, &mut state, false);
+        let finish = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]}"#;
+        let events = parse_sse_chunk(finish, &mut state, false);
+        let input = events
+            .iter()
+            .find_map(|e| match e {
+                LlmEvent::ToolUse { input, .. } => Some(input.clone()),
+                _ => None,
+            })
+            .expect("a ToolUse event must be emitted");
+        assert!(input.is_object() && input.as_object().unwrap().is_empty());
+    }
+
     // F1-9
     #[test]
     fn test_empty_name_toolcall_still_emitted_to_history() {

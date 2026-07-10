@@ -148,6 +148,24 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id:
                 acc.name = name.to_string();
             }
             if let Some(args) = tc["function"]["arguments"].as_str() {
+                // Some OpenAI-compatible gateways (observed on LiteLLM fronting
+                // DeepSeek/Kimi reasoning models) emit a *complete* placeholder
+                // object (e.g. "{}") in the first tool_call delta, then stream
+                // the real arguments in subsequent deltas. Naively concatenating
+                // yields invalid JSON like `{}{"skill":"..."}`, which later
+                // fails to parse and gets silently downgraded to `{}` — so the
+                // tool receives empty parameters and errors with "missing field".
+                //
+                // Detect this: if what we've accumulated so far is already a
+                // complete, valid JSON value and the incoming fragment begins a
+                // fresh object/array, the earlier content was a placeholder —
+                // discard it and start over with the real arguments.
+                if !acc.arguments.is_empty()
+                    && (args.starts_with('{') || args.starts_with('['))
+                    && serde_json::from_str::<Value>(acc.arguments.trim()).is_ok()
+                {
+                    acc.arguments.clear();
+                }
                 acc.arguments.push_str(args);
             }
             if let Some(extra) = tc.get("extra_content").filter(|v| !v.is_null()) {
@@ -170,8 +188,24 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id:
                         } else {
                             tc.id
                         };
-                        let input: Value =
-                            serde_json::from_str(&tc.arguments).unwrap_or(Value::Object(serde_json::Map::new()));
+                        let input: Value = match serde_json::from_str(tc.arguments.trim()) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                // Do not silently swallow — an unparseable
+                                // arguments string means the tool will receive
+                                // empty params and fail with a confusing
+                                // "missing field" error downstream.
+                                tracing::warn!(
+                                    target: "aion_providers",
+                                    tool_call_id = %id,
+                                    tool = %tc.name,
+                                    args_raw = %tc.arguments,
+                                    error = %e,
+                                    "failed to parse tool_call arguments; falling back to empty object"
+                                );
+                                Value::Object(serde_json::Map::new())
+                            }
+                        };
                         if tc.name.is_empty() {
                             tracing::warn!(
                                 target: "aion_providers",
