@@ -6,11 +6,20 @@ use serde_json::{Value, json};
 
 use crate::tool_call_sanitize::{DroppedToolCallReason, format_dropped_tool_call};
 
+/// Render a historical tool result as plain user text (textualized replay).
+fn textualized_tool_result(tool_use_id: &str, content: &str) -> Value {
+    json!({
+        "role": "user",
+        "content": format!("[tool_result {tool_use_id}]\n{content}")
+    })
+}
+
 pub(crate) fn build_messages(messages: &[Message], system: &str, compat: &ProviderCompat) -> Vec<Value> {
     let mut result: Vec<Value> = Vec::new();
     let sanitize = compat.sanitize_malformed_tool_calls();
     let auto_tool_id = compat.auto_tool_id();
     let clean_orphan_tool_results = compat.clean_orphan_tool_results();
+    let textualize_tool_replay = compat.textualize_tool_replay();
     // tool_call ids dropped as malformed; their paired tool results must be
     // skipped later to avoid orphan "tool" messages.
     let mut dropped_ids: HashMap<String, VecDeque<DroppedToolCallReason>> = HashMap::new();
@@ -47,6 +56,10 @@ pub(crate) fn build_messages(messages: &[Message], system: &str, compat: &Provid
                                 .get_mut(tool_use_id)
                                 .and_then(VecDeque::pop_front)
                                 .unwrap_or_else(|| tool_use_id.clone());
+                            if textualize_tool_replay {
+                                result.push(textualized_tool_result(&projected_tool_use_id, content));
+                                continue;
+                            }
                             if clean_orphan_tool_results && !available_tool_call_ids.contains(&projected_tool_use_id) {
                                 tracing::warn!(
                                     target: "aion_providers",
@@ -206,7 +219,26 @@ pub(crate) fn build_messages(messages: &[Message], system: &str, compat: &Provid
                 }
 
                 if !tool_calls.is_empty() {
-                    msg_json["tool_calls"] = json!(tool_calls);
+                    if textualize_tool_replay {
+                        // Downgrade historical tool calls to plain text so
+                        // gateways that cannot round-trip tool_calls replay
+                        // (thinking-mode DeepSeek channels) still accept the
+                        // conversation.
+                        let mut text_parts: Vec<String> = Vec::new();
+                        let existing = msg_json["content"].as_str().unwrap_or("");
+                        if !existing.is_empty() {
+                            text_parts.push(existing.to_owned());
+                        }
+                        for tc in &tool_calls {
+                            let id = tc["id"].as_str().unwrap_or("");
+                            let name = tc["function"]["name"].as_str().unwrap_or("");
+                            let args = tc["function"]["arguments"].as_str().unwrap_or("");
+                            text_parts.push(format!("[tool_call {name} {id}]\n{args}"));
+                        }
+                        msg_json["content"] = json!(text_parts.join("\n\n"));
+                    } else {
+                        msg_json["tool_calls"] = json!(tool_calls);
+                    }
                 }
 
                 result.push(msg_json);
@@ -229,6 +261,10 @@ pub(crate) fn build_messages(messages: &[Message], system: &str, compat: &Provid
                             .get_mut(tool_use_id)
                             .and_then(VecDeque::pop_front)
                             .unwrap_or_else(|| tool_use_id.clone());
+                        if textualize_tool_replay {
+                            result.push(textualized_tool_result(&projected_tool_use_id, content));
+                            continue;
+                        }
                         if clean_orphan_tool_results && !available_tool_call_ids.contains(&projected_tool_use_id) {
                             tracing::warn!(
                                 target: "aion_providers",
@@ -264,7 +300,35 @@ pub(crate) fn build_messages(messages: &[Message], system: &str, compat: &Provid
         merge_consecutive_assistant(&mut result);
     }
 
+    // Textualized replay can leave adjacent user messages (parallel tool
+    // results); merge them since some upstreams reject same-role runs.
+    if textualize_tool_replay {
+        merge_consecutive_user_text(&mut result);
+    }
+
     result
+}
+
+/// Merge runs of consecutive `user` messages with string content into one.
+fn merge_consecutive_user_text(messages: &mut Vec<Value>) {
+    let mut i = 0;
+    while i + 1 < messages.len() {
+        let both_user_text = messages[i]["role"].as_str() == Some("user")
+            && messages[i + 1]["role"].as_str() == Some("user")
+            && messages[i]["content"].is_string()
+            && messages[i + 1]["content"].is_string();
+        if both_user_text {
+            let next = messages.remove(i + 1);
+            let merged = format!(
+                "{}\n\n{}",
+                messages[i]["content"].as_str().unwrap_or(""),
+                next["content"].as_str().unwrap_or("")
+            );
+            messages[i]["content"] = json!(merged);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Generate a unique tool call ID in OpenAI `call_xxx` format.

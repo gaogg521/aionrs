@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use async_trait::async_trait;
 #[cfg(test)]
 use serde_json::Value;
@@ -15,11 +18,32 @@ use crate::transport::ProviderTransport;
 pub(crate) struct ComposedProvider {
     transport: ProviderTransport,
     compat: ProviderCompat,
+    /// Sticky replay-escalation level learned from gateway rejections.
+    /// Shared across clones so later turns of the same session skip the
+    /// levels that already failed instead of re-probing every turn.
+    /// 0 = as configured, 1 = content[].thinking blocks, 2 = omit thinking,
+    /// 3 = textualize tool replay.
+    replay_level: Arc<AtomicU8>,
+}
+
+const MAX_REPLAY_LEVEL: u8 = 3;
+
+fn compat_for_replay_level(base: &ProviderCompat, level: u8) -> ProviderCompat {
+    match level {
+        0 => base.clone(),
+        1 => base.with_thinking_replay_as_content_block(),
+        2 => base.with_thinking_replay_omitted(),
+        _ => base.with_textualized_tool_replay(),
+    }
 }
 
 impl ComposedProvider {
     pub(crate) fn new(transport: ProviderTransport, compat: ProviderCompat) -> Self {
-        Self { transport, compat }
+        Self {
+            transport,
+            compat,
+            replay_level: Arc::new(AtomicU8::new(0)),
+        }
     }
 
     #[cfg(test)]
@@ -30,10 +54,10 @@ impl ComposedProvider {
 }
 
 /// Some OpenAI-protocol gateways front a thinking-capable model through an
-/// Anthropic-shaped validation layer: they reject the flat `reasoning_content`
-/// replay format as "thinking not passed back", even though it was sent.
-/// Detect that specific rejection so `stream()` can retry once with the
-/// `content[].thinking` array-block replay format instead.
+/// Anthropic-shaped conversion layer that cannot round-trip thinking/tool
+/// history: they 400 with "content[].thinking ... must be passed back"
+/// regardless of what the client actually sent. Detect that rejection so
+/// `stream()` can escalate through alternative replay shapes.
 fn is_thinking_replay_format_error(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("content[].thinking") && lower.contains("passed back")
@@ -74,28 +98,30 @@ impl ComposedProvider {
 #[async_trait]
 impl LlmProvider for ComposedProvider {
     async fn stream(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        match self.stream_with_compat(request, &self.compat).await {
-            Err(ProviderError::Api { message, .. })
-                if !self.compat.thinking_replay_as_content_block() && is_thinking_replay_format_error(&message) =>
-            {
-                tracing::warn!(
-                    target: "aion_providers",
-                    "gateway rejected reasoning_content thinking replay; retrying once with content[].thinking blocks"
-                );
-                let content_block_compat = self.compat.with_thinking_replay_as_content_block();
-                match self.stream_with_compat(request, &content_block_compat).await {
-                    Err(ProviderError::Api { message, .. }) if is_thinking_replay_format_error(&message) => {
-                        tracing::warn!(
-                            target: "aion_providers",
-                            "gateway also rejected content[].thinking block replay; retrying once with thinking omitted entirely"
-                        );
-                        let omit_compat = self.compat.with_thinking_replay_omitted();
-                        self.stream_with_compat(request, &omit_compat).await
-                    }
-                    other => other,
+        let mut level = self.replay_level.load(Ordering::Relaxed);
+        loop {
+            let compat = compat_for_replay_level(&self.compat, level);
+            match self.stream_with_compat(request, &compat).await {
+                Err(ProviderError::Api { message, .. })
+                    if level < MAX_REPLAY_LEVEL && is_thinking_replay_format_error(&message) =>
+                {
+                    level += 1;
+                    tracing::warn!(
+                        target: "aion_providers",
+                        replay_level = level,
+                        "gateway rejected thinking/tool replay shape; escalating (1=content-block thinking, 2=omit thinking, 3=textualize tool history)"
+                    );
                 }
+                Ok(rx) => {
+                    // Remember what worked so subsequent turns in this
+                    // session skip the shapes the gateway already rejected.
+                    if level != self.replay_level.load(Ordering::Relaxed) {
+                        self.replay_level.store(level, Ordering::Relaxed);
+                    }
+                    return Ok(rx);
+                }
+                Err(e) => return Err(e),
             }
-            other => other,
         }
     }
 }

@@ -393,7 +393,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(400).set_body_raw(
                 r#"{"error":{"message":"backend error: status=400 body={\"error\":{\"message\":\"The `content[].thinking` in the thinking mode must be passed back to the API.\"}}"}}"#,
                 "application/json",
@@ -403,7 +403,7 @@ mod tests {
             .await;
 
         Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(
                 concat!(
                     "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
@@ -465,5 +465,125 @@ mod tests {
             .expect("retry must replay thinking as a content[] array");
         assert_eq!(content[0]["type"], "thinking");
         assert_eq!(content[0]["thinking"], "reasoning...");
+    }
+
+    /// Multi-turn tool-call history for the escalation tests below.
+    fn tool_history_request() -> LlmRequest {
+        golden_req(
+            vec![
+                Message::new(Role::User, vec![ContentBlock::Text { text: "q1".to_string() }]),
+                Message::new(
+                    Role::Assistant,
+                    vec![
+                        ContentBlock::Thinking {
+                            thinking: "let me call the tool".to_string(),
+                            signature: None,
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "Write".to_string(),
+                            input: json!({"path": "a.txt"}),
+                            extra: None,
+                        },
+                    ],
+                ),
+                Message::new(
+                    Role::User,
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: "wrote a.txt".to_string(),
+                        is_error: false,
+                    }],
+                ),
+            ],
+            sample_tools(),
+        )
+    }
+
+    #[tokio::test]
+    async fn composed_provider_escalates_to_textualized_tool_replay_and_sticks() {
+        let server = MockServer::start().await;
+
+        // The gateway (as observed live: LiteLLM-style fronting DeepSeek V4
+        // thinking) rejects EVERY shape that carries assistant tool_calls,
+        // regardless of thinking replay format. Only textualized history
+        // passes. Match that: fail the first three attempts, then accept.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_raw(
+                r#"{"error":{"message":"backend error: status=400 body={\"error\":{\"message\":\"The `content[].thinking` in the thinking mode must be passed back to the API.\"}}"}}"#,
+                "application/json",
+            ))
+            .up_to_n_times(3)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+                "text/event-stream",
+            ))
+            .mount(&server)
+            .await;
+
+        let provider = ComposedProvider::new(
+            ProviderTransport::OpenAi(OpenAiTransport::new("test-key", &server.uri())),
+            ProviderCompat::openai_defaults(),
+        );
+
+        let request = tool_history_request();
+        let mut rx = provider
+            .stream(&request)
+            .await
+            .expect("stream should succeed after escalating to textualized replay");
+        assert!(matches!(
+            rx.recv().await,
+            Some(LlmEvent::TextDelta(text)) if text == "ok"
+        ));
+
+        let received = server.received_requests().await.expect("wiremock records requests");
+        assert_eq!(received.len(), 4, "original + three escalation retries");
+
+        let final_body: serde_json::Value = received[3].body_json().expect("final body is valid json");
+        let messages = final_body["messages"].as_array().unwrap();
+        assert!(
+            messages.iter().all(|m| m.get("tool_calls").is_none()),
+            "textualized replay must not carry tool_calls: {final_body}"
+        );
+        assert!(
+            messages.iter().all(|m| m["role"] != "tool"),
+            "textualized replay must not carry tool role messages: {final_body}"
+        );
+        let assistant = messages.iter().find(|m| m["role"] == "assistant").unwrap();
+        let text = assistant["content"].as_str().unwrap();
+        assert!(text.contains("[tool_call Write call_1]"), "content was: {text}");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["role"] == "user" && m["content"].as_str().unwrap_or("").contains("[tool_result call_1]")),
+            "tool result must be replayed as user text: {final_body}"
+        );
+
+        // Second turn on the same provider instance must go straight to the
+        // learned textualized shape — exactly one more request, no re-probing.
+        let mut rx2 = provider
+            .stream(&request)
+            .await
+            .expect("second stream should succeed immediately");
+        assert!(matches!(
+            rx2.recv().await,
+            Some(LlmEvent::TextDelta(text)) if text == "ok"
+        ));
+        let received = server.received_requests().await.expect("wiremock records requests");
+        assert_eq!(received.len(), 5, "sticky level: second turn sends exactly one request");
+        let sticky_body: serde_json::Value = received[4].body_json().expect("sticky body is valid json");
+        assert!(
+            sticky_body["messages"].as_array().unwrap().iter().all(|m| m.get("tool_calls").is_none()),
+            "sticky turn must reuse textualized replay: {sticky_body}"
+        );
     }
 }

@@ -158,6 +158,20 @@ pub struct ReasoningCompat {
     /// no shape a client can send that satisfies that gateway, so dropping
     /// the claim entirely is the only remaining option. Default: false.
     pub omit_thinking_replay: Option<bool>,
+
+    /// Replay historical tool traffic as plain text: assistant `tool_calls`
+    /// become bracketed text lines in `content`, and `tool` role results
+    /// become `user` text messages. Implies omitting thinking replay.
+    ///
+    /// Black-box probing of a real gateway (LiteLLM-style, fronting
+    /// DeepSeek V4 thinking models) showed it 400s on *any* request whose
+    /// history contains an assistant `tool_calls` entry — regardless of
+    /// thinking declaration or replay format — because its upstream
+    /// conversion cannot round-trip thinking blocks alongside tool use.
+    /// The same conversation replayed as plain text succeeds. Default:
+    /// false; the OpenAI transport escalates to this as the final
+    /// automatic retry (see `composed.rs`).
+    pub textualize_tool_replay: Option<bool>,
 }
 
 impl TransportCompat {
@@ -219,6 +233,7 @@ impl ReasoningCompat {
                 .thinking_replay_as_content_block
                 .or(defaults.thinking_replay_as_content_block),
             omit_thinking_replay: user.omit_thinking_replay.or(defaults.omit_thinking_replay),
+            textualize_tool_replay: user.textualize_tool_replay.or(defaults.textualize_tool_replay),
         }
     }
 }
@@ -444,6 +459,19 @@ impl ProviderCompat {
         let mut next = self.clone();
         next.reasoning.thinking_replay_as_content_block = Some(false);
         next.reasoning.omit_thinking_replay = Some(true);
+        next
+    }
+
+    pub fn textualize_tool_replay(&self) -> bool {
+        self.reasoning.textualize_tool_replay.unwrap_or(false)
+    }
+
+    /// Return a copy of this compat with tool replay textualized (and
+    /// thinking replay omitted). Used for the final automatic retry in
+    /// `composed.rs`.
+    pub fn with_textualized_tool_replay(&self) -> Self {
+        let mut next = self.with_thinking_replay_omitted();
+        next.reasoning.textualize_tool_replay = Some(true);
         next
     }
 }

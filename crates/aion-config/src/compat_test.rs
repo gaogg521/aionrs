@@ -114,6 +114,7 @@ max_tokens = 64000
                 effort_levels: Some(vec!["low".to_string(), "medium".to_string()]),
                 thinking_replay_as_content_block: None,
                 omit_thinking_replay: None,
+                textualize_tool_replay: None,
             },
         };
 
@@ -186,6 +187,7 @@ max_tokens = 64000
                 effort_levels: Some(vec!["custom".to_string()]),
                 thinking_replay_as_content_block: None,
                 omit_thinking_replay: None,
+                textualize_tool_replay: None,
             },
         };
 
