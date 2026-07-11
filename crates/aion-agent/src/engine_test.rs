@@ -211,6 +211,7 @@ mod tests_set_config {
                 supports_thinking: Some(true),
                 supports_effort: Some(true),
                 effort_levels: Some(vec!["low".into()]),
+                ..Default::default()
             },
             ..Default::default()
         };
