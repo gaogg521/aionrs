@@ -2,14 +2,7 @@
 
 ## ⚠️ 这是 fork,不是上游(新 AI 首读)
 
-> 本仓 = **fork**,由 iOfficeAI/aionrs 单向同步而来。**只上游 → fork,永不反向提 PR。**
-
-| 项 | 值 |
-|---|---|
-| origin(fork) | [`gaogg521/aionrs`](https://github.com/gaogg521/aionrs)(本地 `../aionrs-local`,分支 `master`)|
-| upstream(上游)| [`iOfficeAI/aionrs`](https://github.com/iOfficeAI/aionrs) |
-| 已同步到 | **v0.2.2**(=upstream/main,2026-07-12 对齐,落后 0)|
-| fork 领先 | 4 个自有 commit(fork 专属补丁)|
+> **本仓 = fork，只单向同步上游 → fork，永不反向提 PR。** 三仓对上游的映射、版本对照、当前同步状态、同步套路与不变量见：[`../1oneUI/docs/guides/upstream-sync-reference.zh-CN.md`](../1oneUI/docs/guides/upstream-sync-reference.zh-CN.md)
 
 **master 上的 4 个 fork 专属补丁(上游没有,必保留)**:
 - `3f7b9b5` 流式 tool_call 参数占位空对象空参 bug 修复。
