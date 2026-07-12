@@ -65,7 +65,15 @@ impl Tool for ExecCommandTool {
          # Instructions\n\
          - Use absolute paths to avoid working directory confusion.\n\
          - When issuing multiple independent commands, make parallel tool calls \
-         instead of chaining them. Use `&&` only when commands depend on each other.\n\
+         instead of chaining them. Only chain dependent commands, and check the \
+         resolved shell (see 'Default shell' in your system prompt) before choosing \
+         a separator: `&&`/`||` work in bash/zsh/sh and PowerShell 7+ (pwsh), but \
+         Windows PowerShell 5.1 (the Windows default when pwsh is not installed) does \
+         NOT support them as statement separators and will error — use `;` there instead, \
+         or issue separate tool calls.\n\
+         - On PowerShell, avoid Unix-only syntax: no heredocs, `2>/dev/null` (use \
+         `2>$null`), or bash-style env assignment (`VAR=x cmd`); call native executables \
+         with spaces in their path via the call operator `&`.\n\
          - You may specify an optional timeout in milliseconds (default 120000, max 600000).\n\n\
          # Git safety\n\
          - Never force push, reset --hard, or use --no-verify unless explicitly asked.\n\

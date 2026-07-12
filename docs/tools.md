@@ -44,6 +44,9 @@ Execute a shell command and return the result.
 
 - Default timeout: 120 seconds, max 600 seconds
 - Returns exit code, stdout, and stderr
+- On Windows, the resolved default shell falls back to legacy Windows PowerShell 5.1
+  when `pwsh` (PowerShell 7+) is not installed; the tool description warns the LLM
+  that 5.1 does not support `&&`/`||` as statement separators (use `;` instead)
 
 ## Grep
 
