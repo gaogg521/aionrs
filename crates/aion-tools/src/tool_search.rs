@@ -5,17 +5,46 @@ use aion_protocol::events::ToolCategory;
 use aion_types::tool::{JsonSchema, ToolDef, ToolResult};
 
 use crate::Tool;
+use crate::registry::{LoadedSchemaSet, mark_schemas_loaded};
 
 /// Built-in tool that searches for deferred tools and loads their full schema.
 /// Core tool (never deferred itself) — always available to the LLM.
 pub struct ToolSearchTool {
     /// Snapshot of all tool definitions (taken at construction time).
     tool_defs: Vec<ToolDef>,
+    /// Shared promoted-schema set from the owning registry. Matched tools are
+    /// inserted here so subsequent requests declare their full schema —
+    /// schema-constrained providers cannot use a schema that only exists as
+    /// tool-result text.
+    loaded_schemas: Option<LoadedSchemaSet>,
 }
 
 impl ToolSearchTool {
     pub fn new(tool_defs: Vec<ToolDef>) -> Self {
-        Self { tool_defs }
+        Self {
+            tool_defs,
+            loaded_schemas: None,
+        }
+    }
+
+    /// Construct with the registry's promoted-schema handle so successful
+    /// searches promote the matched deferred tools to full declaration.
+    pub fn with_loaded_schemas(tool_defs: Vec<ToolDef>, loaded_schemas: LoadedSchemaSet) -> Self {
+        Self {
+            tool_defs,
+            loaded_schemas: Some(loaded_schemas),
+        }
+    }
+
+    /// Comma-separated names of all deferred tools in the snapshot, for the
+    /// miss message — stops models from retrying free-text queries blindly.
+    fn deferred_names(&self) -> String {
+        self.tool_defs
+            .iter()
+            .filter(|d| d.deferred)
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -74,16 +103,28 @@ impl Tool for ToolSearchTool {
             .collect();
 
         if matches.is_empty() {
+            let deferred = self.deferred_names();
+            let deferred_line = if deferred.is_empty() {
+                "There are no deferred tools in this session at all — never call ToolSearch again.".to_string()
+            } else {
+                format!("The only deferred tools in this session are: {deferred}.")
+            };
             return ToolResult {
                 content: format!(
-                    "No deferred tools matching \"{}\" found. This only means no *deferred* tool matched — \
-                     most tools are not deferred and already appear in your available tools list with their \
-                     full parameters. If a tool with this name is already visible there, call it directly \
-                     instead of searching for it.",
-                    query
+                    "No deferred tools matching \"{query}\" found. {deferred_line} \
+                     Every other tool already appears in your available tools list with its \
+                     full parameters — call those directly by name instead of searching. \
+                     Do not use ToolSearch to look for skills: invoke skills with the Skill tool."
                 ),
                 is_error: false,
             };
+        }
+
+        // Promote matched tools: from the next request on they are declared
+        // with their full schema, so schema-constrained providers can emit
+        // real arguments instead of being forced to `{}` by the stub.
+        if let Some(set) = &self.loaded_schemas {
+            mark_schemas_loaded(set, matches.iter().filter_map(|m| m["name"].as_str()));
         }
 
         ToolResult {

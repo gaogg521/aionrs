@@ -116,9 +116,8 @@ pub(crate) fn build_messages(messages: &[Message], system: &str, compat: &Provid
                     .join("");
 
                 let omit_thinking_replay = !thinking.is_empty() && compat.omit_thinking_replay();
-                let replay_thinking_as_content_block = !thinking.is_empty()
-                    && !omit_thinking_replay
-                    && compat.thinking_replay_as_content_block();
+                let replay_thinking_as_content_block =
+                    !thinking.is_empty() && !omit_thinking_replay && compat.thinking_replay_as_content_block();
                 if !thinking.is_empty() && !replay_thinking_as_content_block && !omit_thinking_replay {
                     msg_json["reasoning_content"] = json!(thinking);
                 }

@@ -170,7 +170,15 @@ async fn execute_single(
                 tool.context_modifier_for(input)
             };
             let error_content = if r.is_error && tool.is_deferred() {
-                maybe_append_deferred_hint(&r.content, tool.input_schema(), input)
+                let (content, schema_was_missing) = maybe_append_deferred_hint(&r.content, tool.input_schema(), input);
+                if schema_was_missing {
+                    // Promote immediately: the very next request declares this
+                    // tool with its full schema, so schema-constrained
+                    // providers (stub schema forces `{}` arguments) succeed on
+                    // retry instead of looping into the failure breaker.
+                    registry.mark_schema_loaded(name);
+                }
+                content
             } else {
                 r.content.clone()
             };
@@ -362,11 +370,15 @@ fn block_is_error(block: &ContentBlock) -> bool {
 }
 
 /// When a deferred tool fails AND the input is missing required fields from
-/// its full schema, append a hint telling the LLM to call ToolSearch first.
-/// If required fields are all present (or the schema has none), the original
-/// error is returned unchanged — the failure is a runtime issue, not a
-/// missing-schema problem.
-fn maybe_append_deferred_hint(original_error: &str, schema: serde_json::Value, input: &serde_json::Value) -> String {
+/// its full schema, append a hint and report `true` so the caller promotes
+/// the tool's full schema into subsequent requests. If required fields are
+/// all present (or the schema has none), the original error is returned
+/// unchanged — the failure is a runtime issue, not a missing-schema problem.
+fn maybe_append_deferred_hint(
+    original_error: &str,
+    schema: serde_json::Value,
+    input: &serde_json::Value,
+) -> (String, bool) {
     let missing: Vec<&str> = schema["required"]
         .as_array()
         .map(|arr| {
@@ -378,13 +390,18 @@ fn maybe_append_deferred_hint(original_error: &str, schema: serde_json::Value, i
         .unwrap_or_default();
 
     if missing.is_empty() {
-        return original_error.to_string();
+        return (original_error.to_string(), false);
     }
 
-    format!(
-        "{}\n\nThis is a deferred tool — its full parameter schema was not loaded. \
-         Call ToolSearch to load the schema, then retry.",
-        original_error
+    (
+        format!(
+            "{}\n\nThis was a deferred tool called without its required parameters ({}). \
+             Its full schema has NOW been loaded into your tools list — call the tool again, \
+             this time providing the required parameters.",
+            original_error,
+            missing.join(", ")
+        ),
+        true,
     )
 }
 

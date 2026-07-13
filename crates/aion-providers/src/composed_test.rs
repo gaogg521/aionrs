@@ -57,7 +57,10 @@ mod tests {
         // satisfy on follow-up turns (see compat.rs comment on
         // `openai_defaults()` for the upstream issue this matches).
         let compat = ProviderCompat::openai_defaults();
-        assert!(!compat.supports_thinking(), "openai_defaults() should not force thinking on by default");
+        assert!(
+            !compat.supports_thinking(),
+            "openai_defaults() should not force thinking on by default"
+        );
         let provider = openai_provider(compat);
         let mut req = test_request();
         req.thinking = None;
@@ -440,14 +443,21 @@ mod tests {
             vec![],
         );
 
-        let mut rx = provider.stream(&request).await.expect("stream should succeed after one retry");
+        let mut rx = provider
+            .stream(&request)
+            .await
+            .expect("stream should succeed after one retry");
         assert!(matches!(
             rx.recv().await,
             Some(LlmEvent::TextDelta(text)) if text == "ok"
         ));
 
         let received = server.received_requests().await.expect("wiremock records requests");
-        assert_eq!(received.len(), 2, "should send the original request then exactly one retry");
+        assert_eq!(
+            received.len(),
+            2,
+            "should send the original request then exactly one retry"
+        );
 
         let retried_body: serde_json::Value = received[1].body_json().expect("retry body is valid json");
         let assistant_msg = retried_body["messages"]
@@ -582,7 +592,11 @@ mod tests {
         assert_eq!(received.len(), 5, "sticky level: second turn sends exactly one request");
         let sticky_body: serde_json::Value = received[4].body_json().expect("sticky body is valid json");
         assert!(
-            sticky_body["messages"].as_array().unwrap().iter().all(|m| m.get("tool_calls").is_none()),
+            sticky_body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m.get("tool_calls").is_none()),
             "sticky turn must reuse textualized replay: {sticky_body}"
         );
     }

@@ -312,7 +312,10 @@ impl AgentBootstrap {
 
     fn register_tool_search(registry: &mut ToolRegistry) {
         let tool_defs_snapshot = registry.to_tool_defs();
-        registry.register(Box::new(ToolSearchTool::new(tool_defs_snapshot)));
+        registry.register(Box::new(ToolSearchTool::with_loaded_schemas(
+            tool_defs_snapshot,
+            registry.loaded_schemas_handle(),
+        )));
     }
 
     fn into_engine(

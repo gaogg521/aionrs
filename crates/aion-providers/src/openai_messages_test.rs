@@ -99,7 +99,9 @@ mod tests {
             assistant_msgs[0].get("reasoning_content").is_none(),
             "content-block replay must not also set reasoning_content"
         );
-        let content = assistant_msgs[0]["content"].as_array().expect("content must be an array");
+        let content = assistant_msgs[0]["content"]
+            .as_array()
+            .expect("content must be an array");
         assert_eq!(content[0]["type"], "thinking");
         assert_eq!(content[0]["thinking"], "private chain");
         assert_eq!(content[1]["type"], "text");
@@ -120,7 +122,9 @@ mod tests {
         let result = build_messages(&messages, "", &compat);
         let assistant_msgs: Vec<_> = result.iter().filter(|m| m["role"] == "assistant").collect();
 
-        let content = assistant_msgs[0]["content"].as_array().expect("content must be an array");
+        let content = assistant_msgs[0]["content"]
+            .as_array()
+            .expect("content must be an array");
         assert_eq!(content.len(), 1, "no text/downgrade lines means no trailing text block");
         assert_eq!(content[0]["type"], "thinking");
     }

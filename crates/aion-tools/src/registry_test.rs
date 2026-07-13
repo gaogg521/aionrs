@@ -251,4 +251,51 @@ mod tests {
         let defs = registry.to_tool_defs();
         assert!(defs[0].deferred, "deferred tool should have deferred=true");
     }
+
+    #[test]
+    fn mark_schema_loaded_promotes_deferred_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(DeferredMockTool {
+            tool_name: "lazy_tool".to_string(),
+        }));
+
+        registry.mark_schema_loaded("lazy_tool");
+        let defs = registry.to_tool_defs();
+        assert!(
+            !defs[0].deferred,
+            "loaded deferred tool must be declared with full schema"
+        );
+    }
+
+    #[test]
+    fn loaded_schemas_handle_shared_with_tool_search_promotes() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(DeferredMockTool {
+            tool_name: "lazy_tool".to_string(),
+        }));
+
+        let handle = registry.loaded_schemas_handle();
+        crate::registry::mark_schemas_loaded(&handle, std::iter::once("lazy_tool"));
+        let defs = registry.to_tool_defs();
+        assert!(
+            !defs[0].deferred,
+            "promotion via shared handle must affect the registry"
+        );
+    }
+
+    #[test]
+    fn mark_schema_loaded_does_not_affect_other_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(DeferredMockTool {
+            tool_name: "lazy_a".to_string(),
+        }));
+        registry.register(Box::new(DeferredMockTool {
+            tool_name: "lazy_b".to_string(),
+        }));
+
+        registry.mark_schema_loaded("lazy_a");
+        let defs = registry.to_tool_defs();
+        assert!(!defs.iter().find(|d| d.name == "lazy_a").unwrap().deferred);
+        assert!(defs.iter().find(|d| d.name == "lazy_b").unwrap().deferred);
+    }
 }

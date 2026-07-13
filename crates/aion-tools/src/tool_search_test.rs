@@ -67,6 +67,9 @@ mod tests {
         let result = tool.execute(json!({"query": "nonexistent"})).await;
         assert!(!result.is_error);
         assert!(result.content.contains("No deferred tools"));
+        // Miss message enumerates the actual deferred tools so the model
+        // stops probing with free-text queries.
+        assert!(result.content.contains("SpawnTool, EnterPlanMode"));
     }
 
     #[tokio::test]
@@ -74,5 +77,32 @@ mod tests {
         let tool = ToolSearchTool::new(build_tool_defs());
         let result = tool.execute(json!({"query": ""})).await;
         assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn search_hit_promotes_matched_tools() {
+        use crate::registry::LoadedSchemaSet;
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+
+        let set: LoadedSchemaSet = Arc::new(Mutex::new(HashSet::new()));
+        let tool = ToolSearchTool::with_loaded_schemas(build_tool_defs(), Arc::clone(&set));
+        let result = tool.execute(json!({"query": "SpawnTool"})).await;
+        assert!(!result.is_error);
+        let loaded = set.lock().unwrap();
+        assert!(loaded.contains("SpawnTool"));
+        assert!(!loaded.contains("EnterPlanMode"));
+    }
+
+    #[tokio::test]
+    async fn search_miss_promotes_nothing() {
+        use crate::registry::LoadedSchemaSet;
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+
+        let set: LoadedSchemaSet = Arc::new(Mutex::new(HashSet::new()));
+        let tool = ToolSearchTool::with_loaded_schemas(build_tool_defs(), Arc::clone(&set));
+        let _ = tool.execute(json!({"query": "nonexistent"})).await;
+        assert!(set.lock().unwrap().is_empty());
     }
 }
