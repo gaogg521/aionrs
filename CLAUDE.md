@@ -12,6 +12,8 @@
 - `8de0bf5` **deferred 工具 schema 命中即提升(命脉)** = 兜 GLM 等受约束解码渠道对 stub schema 只能生成 `{}` 空参的死循环(ToolSearch 命中/空参失败均提升为全量申报);详见 1oneUI 的 [`session-2026-07-13-deferred-schema-and-assistant-skills.zh-CN.md`](../1oneUI/docs/guides/session-2026-07-13-deferred-schema-and-assistant-skills.zh-CN.md)。
 - `92d9242` **GLM 盲搜纠偏(命脉,与 8de0bf5 同源)** = 系统提示 + ToolSearch 未命中消息把 GLM 从「把延迟工具引导过度泛化、盲搜核心工具/技能」拉回直接调用 Skill/直连工具;同上文档。
 
+> **8de0bf5 + 92d9242 是机制级修复,无任何模型名硬判**(符合 No Hardcoded Provider Quirks):修的是延迟工具机制本身对受约束解码模型不友好的缺陷,对所有模型生效,GLM 只是第一个踩崩的。若将来提示级纠偏不够,后备是 `ProviderCompat.eager_tool_schemas`(按 provider 配置关 deferral,仍非按模型名),别退回到 `if model==...` 特判。
+
 **关键认知**:上游 PR #203 只改 thinking **声明**(v0.2.2 已含),fork 的 4 级重试阶梯(0原样/1 content-block/2 省略/3 文本化)是**正交的 fork 专属基础设施**,同步上游时必保留。
 
 **下游依赖**:1oneCore 的 `aion-* = { git="gaogg521/aionrs", branch="master" }` 直接吃本仓 master。改完 master 推 origin 后,1oneCore `cargo build` 自动对齐。
