@@ -73,6 +73,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_miss_lists_directly_callable_tools() {
+        let tool = ToolSearchTool::new(build_tool_defs());
+        let result = tool.execute(json!({"query": "write file"})).await;
+        assert!(!result.is_error);
+        // Non-deferred tools must be named as already-available so models that
+        // over-search (GLM) get a concrete inventory instead of looping.
+        assert!(result.content.contains("ALREADY available"));
+        assert!(result.content.contains("Read"));
+        // ToolSearch must not list itself as a directly-callable action.
+        assert!(!result.content.contains(": ToolSearch") && !result.content.contains(", ToolSearch"));
+        // Skill guidance present.
+        assert!(result.content.contains("Skill tool"));
+    }
+
+    #[tokio::test]
     async fn search_empty_query_returns_error() {
         let tool = ToolSearchTool::new(build_tool_defs());
         let result = tool.execute(json!({"query": ""})).await;

@@ -820,10 +820,16 @@ mod tests {
             false,
         );
         assert!(
-            result.contains("deferred"),
+            result.contains("Deferred") || result.contains("deferred"),
             "tool guidance should mention deferred tools"
         );
         assert!(result.contains("ToolSearch"), "tool guidance should mention ToolSearch");
+        // Guidance must steer models away from ToolSearch-ing for skills and
+        // toward the Skill tool — the GLM flailing fix.
+        assert!(
+            result.contains("Skill tool"),
+            "tool guidance should tell the model to run skills via the Skill tool"
+        );
     }
 
     #[test]

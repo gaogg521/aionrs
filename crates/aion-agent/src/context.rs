@@ -80,13 +80,15 @@ However, if one call depends on a previous result, run them sequentially.
  - Prefer Edit over Write for modifying existing files — Edit sends only \
 the diff, which is easier to review.
  - Always Read a file before editing it.
- - Some tools are deferred — only their names are visible. Before calling \
-a deferred tool, use ToolSearch to load its full schema first. Most tools \
-are NOT deferred: they already appear in your tools list with full \
-parameters, and you should call them directly by name without ToolSearch. \
-A \"no deferred tools matching\" result from ToolSearch does not mean the \
-tool doesn't exist — check your tools list first before falling back to \
-a workaround."
+ - Almost every tool is available RIGHT NOW in your tools list with full \
+parameters — call it directly by name. Do NOT call ToolSearch to \"discover\" \
+or \"load\" tools you can already see (Read, Write, Edit, Grep, Glob, \
+ExecCommand, Skill, etc. are always directly callable). ToolSearch exists \
+ONLY to load the schema of the small set of tools explicitly marked \
+\"(Deferred)\" in their description — nothing else. \
+ - To run a skill, call the Skill tool with the skill name as the `skill` \
+argument (e.g. Skill(skill=\"officecli-financial-model\")). Never ToolSearch \
+for a skill; skills are not tools and will never appear in ToolSearch results."
 }
 
 /// Build the system prompt from config and environment.

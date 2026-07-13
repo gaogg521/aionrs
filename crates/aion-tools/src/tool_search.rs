@@ -46,6 +46,20 @@ impl ToolSearchTool {
             .collect::<Vec<_>>()
             .join(", ")
     }
+
+    /// Comma-separated names of all non-deferred tools — the ones already
+    /// callable directly with full parameters. Some models (observed with
+    /// GLM behind constrained-decoding gateways) over-apply the deferred-tool
+    /// guidance and keep searching for core tools they already have; handing
+    /// them the explicit inventory on every miss breaks that loop.
+    fn directly_callable_names(&self) -> String {
+        self.tool_defs
+            .iter()
+            .filter(|d| !d.deferred && d.name != "ToolSearch")
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 #[async_trait]
@@ -105,16 +119,24 @@ impl Tool for ToolSearchTool {
         if matches.is_empty() {
             let deferred = self.deferred_names();
             let deferred_line = if deferred.is_empty() {
-                "There are no deferred tools in this session at all — never call ToolSearch again.".to_string()
+                "There are NO deferred tools in this session — you never need ToolSearch.".to_string()
             } else {
-                format!("The only deferred tools in this session are: {deferred}.")
+                format!("The ONLY deferred tools (the only ones ToolSearch can load) are: {deferred}.")
+            };
+            let callable = self.directly_callable_names();
+            let callable_line = if callable.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " These tools are ALREADY available right now — call them directly by name, do NOT search for them: {callable}."
+                )
             };
             return ToolResult {
                 content: format!(
-                    "No deferred tools matching \"{query}\" found. {deferred_line} \
-                     Every other tool already appears in your available tools list with its \
-                     full parameters — call those directly by name instead of searching. \
-                     Do not use ToolSearch to look for skills: invoke skills with the Skill tool."
+                    "No deferred tools matching \"{query}\" found. {deferred_line}{callable_line} \
+                     To run a skill (e.g. officecli, financial-model), call the Skill tool with the \
+                     skill name as the `skill` argument — do NOT ToolSearch for skills. \
+                     Stop searching and take the next real action now."
                 ),
                 is_error: false,
             };
