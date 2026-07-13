@@ -75,7 +75,13 @@ impl Tool for ToolSearchTool {
 
         if matches.is_empty() {
             return ToolResult {
-                content: format!("No deferred tools matching \"{}\" found.", query),
+                content: format!(
+                    "No deferred tools matching \"{}\" found. This only means no *deferred* tool matched — \
+                     most tools are not deferred and already appear in your available tools list with their \
+                     full parameters. If a tool with this name is already visible there, call it directly \
+                     instead of searching for it.",
+                    query
+                ),
                 is_error: false,
             };
         }

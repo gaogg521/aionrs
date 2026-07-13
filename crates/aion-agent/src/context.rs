@@ -81,7 +81,12 @@ However, if one call depends on a previous result, run them sequentially.
 the diff, which is easier to review.
  - Always Read a file before editing it.
  - Some tools are deferred — only their names are visible. Before calling \
-a deferred tool, use ToolSearch to load its full schema first."
+a deferred tool, use ToolSearch to load its full schema first. Most tools \
+are NOT deferred: they already appear in your tools list with full \
+parameters, and you should call them directly by name without ToolSearch. \
+A \"no deferred tools matching\" result from ToolSearch does not mean the \
+tool doesn't exist — check your tools list first before falling back to \
+a workaround."
 }
 
 /// Build the system prompt from config and environment.
