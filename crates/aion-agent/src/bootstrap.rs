@@ -20,11 +20,12 @@ use aion_tools::grep::GrepTool;
 use aion_tools::read::ReadTool;
 use aion_tools::registry::ToolRegistry;
 use aion_tools::tool_search::ToolSearchTool;
+use aion_tools::view_image::ViewImageTool;
 use aion_tools::write::WriteTool;
 use anyhow::Result;
 use tracing::info;
 
-use crate::context::{SystemPromptCache, build_system_prompt_with_shell};
+use crate::context::{SystemPromptCache, build_system_prompt_with_shell_and_tool_policy};
 use crate::engine::AgentEngine;
 use crate::output::OutputSink;
 use crate::plan::tools::{EnterPlanModeTool, ExitPlanModeTool};
@@ -32,6 +33,7 @@ use crate::session::Session;
 use crate::skill_tool::SkillTool;
 use crate::spawn_tool::SpawnTool;
 use crate::spawner::AgentSpawner;
+use crate::tool_policy::ToolPolicy;
 
 /// Result of bootstrapping an agent engine with all features initialized.
 pub struct BootstrapResult {
@@ -68,6 +70,7 @@ pub struct AgentBootstrap {
     provider: Option<Arc<dyn LlmProvider>>,
     resume_session: Option<Session>,
     runtime_env: Vec<(String, String)>,
+    tool_policy: ToolPolicy,
 }
 
 struct BootstrapEnvironment {
@@ -104,6 +107,7 @@ impl AgentBootstrap {
             provider: None,
             resume_session: None,
             runtime_env: Vec::new(),
+            tool_policy: ToolPolicy::default(),
         }
     }
 
@@ -122,6 +126,12 @@ impl AgentBootstrap {
     /// Inject process environment for tools/hooks/MCP subprocesses owned by this engine.
     pub fn runtime_env(mut self, runtime_env: Vec<(String, String)>) -> Self {
         self.runtime_env = runtime_env;
+        self
+    }
+
+    /// Restrict which registered tools can be advertised and executed.
+    pub fn tool_policy(mut self, tool_policy: ToolPolicy) -> Self {
+        self.tool_policy = tool_policy;
         self
     }
 
@@ -151,7 +161,7 @@ impl AgentBootstrap {
 
         self.register_agent_tools(&mut registry, &provider, &environment.workspace, skills);
         let plan_active_flag = self.register_plan_tools(&mut registry);
-        Self::register_tool_search(&mut registry);
+        self.register_tool_search(&mut registry);
 
         let has_mcp = mcp.has_mcp();
         let mcp_managers = mcp.managers;
@@ -200,6 +210,7 @@ impl AgentBootstrap {
         )));
         registry.register(Box::new(GrepTool::new(workspace_path.to_path_buf())));
         registry.register(Box::new(GlobTool::new(workspace_path.to_path_buf())));
+        registry.register(Box::new(ViewImageTool::new()));
 
         registry
     }
@@ -257,7 +268,7 @@ impl AgentBootstrap {
     fn configure_system_prompt(&mut self, environment: &BootstrapEnvironment, skills: &[SkillMetadata]) {
         let mut prompt_cache = SystemPromptCache::new();
         let workspace = self.workspace.to_string_lossy();
-        let system_prompt = build_system_prompt_with_shell(
+        let system_prompt = build_system_prompt_with_shell_and_tool_policy(
             &mut prompt_cache,
             self.config.system_prompt.as_deref(),
             &workspace,
@@ -268,6 +279,7 @@ impl AgentBootstrap {
             environment.memory_dir.as_deref(),
             false,
             self.config.compact.toon,
+            &self.tool_policy,
         );
         self.config.system_prompt = Some(system_prompt);
     }
@@ -295,6 +307,7 @@ impl AgentBootstrap {
             self.config.clone(),
             workspace.to_path_buf(),
             self.runtime_env.clone(),
+            self.tool_policy.clone(),
         );
         registry.register(Box::new(SpawnTool::new(Arc::new(spawner))));
     }
@@ -310,8 +323,11 @@ impl AgentBootstrap {
         plan_active_flag
     }
 
-    fn register_tool_search(registry: &mut ToolRegistry) {
-        let tool_defs_snapshot = registry.to_tool_defs();
+    fn register_tool_search(&self, registry: &mut ToolRegistry) {
+        // Upstream: filter ToolSearch catalog by runtime tool policy.
+        // Fork: keep with_loaded_schemas so deferred schema hits promote into the live registry.
+        let tool_defs_snapshot =
+            registry.to_tool_defs_filtered(|tool| self.tool_policy.allows(tool.name()));
         registry.register(Box::new(ToolSearchTool::with_loaded_schemas(
             tool_defs_snapshot,
             registry.loaded_schemas_handle(),
@@ -340,6 +356,7 @@ impl AgentBootstrap {
             AgentEngine::new_with_provider_and_env(provider, self.config, registry, self.output, workspace, runtime_env)
         };
         engine.set_plan_active_flag(plan_active_flag);
+        engine.set_tool_policy(self.tool_policy);
         engine
     }
 }

@@ -16,6 +16,7 @@ mod tests_set_config {
     use aion_providers::provider::LlmProvider;
     use aion_tools::registry::ToolRegistry;
     use aion_types::llm::{LlmEvent, LlmRequest};
+    use aion_types::message::ImageInputCapability;
 
     use super::{CompactLevel, ProviderCompat};
     use crate::confirm::ToolConfirmer;
@@ -58,6 +59,7 @@ mod tests_set_config {
             max_tool_call_malformed_turns: 3,
             max_tool_call_failure_turns: 3,
             tools: ToolRegistry::new(),
+            tool_policy: Default::default(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
             allow_list: vec![],
             hooks: None,
@@ -88,7 +90,7 @@ mod tests_set_config {
     #[test]
     fn set_config_changes_model() {
         let mut engine = make_engine("old-model");
-        let changes = engine.apply_config_update(Some("new-model".into()), None, None, None, None);
+        let changes = engine.apply_config_update(Some("new-model".into()), None, None, None, None, None);
         assert_eq!(engine.model, "new-model");
         assert_eq!(changes.len(), 1);
         assert!(changes[0].contains("old-model"));
@@ -98,7 +100,7 @@ mod tests_set_config {
     #[test]
     fn set_config_none_model_no_change() {
         let mut engine = make_engine("current");
-        let changes = engine.apply_config_update(None, None, None, None, None);
+        let changes = engine.apply_config_update(None, None, None, None, None, None);
         assert_eq!(engine.model, "current");
         assert!(changes.is_empty());
     }
@@ -106,14 +108,14 @@ mod tests_set_config {
     #[test]
     fn set_config_same_model_still_reports_change() {
         let mut engine = make_engine("same");
-        let changes = engine.apply_config_update(Some("same".into()), None, None, None, None);
+        let changes = engine.apply_config_update(Some("same".into()), None, None, None, None, None);
         assert_eq!(changes.len(), 1);
     }
 
     #[test]
     fn set_config_empty_string_model_accepted() {
         let mut engine = make_engine("real-model");
-        engine.apply_config_update(Some(String::new()), None, None, None, None);
+        engine.apply_config_update(Some(String::new()), None, None, None, None, None);
         assert_eq!(engine.model, "");
     }
 
@@ -121,9 +123,41 @@ mod tests_set_config {
     fn set_config_model_does_not_affect_other_state() {
         let mut engine = make_engine("m");
         engine.reasoning_effort = Some("high".into());
-        engine.apply_config_update(Some("new-m".into()), None, None, None, None);
+        engine.apply_config_update(Some("new-m".into()), None, None, None, None, None);
         assert_eq!(engine.model, "new-m");
         assert_eq!(engine.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn set_config_model_change_resets_stale_image_capability() {
+        let compat = ProviderCompat {
+            image_input: Some(ImageInputCapability::Supported),
+            ..Default::default()
+        };
+        let mut engine = make_engine_with_compat("vision-model", compat);
+
+        let changes = engine.apply_config_update(Some("text-model".into()), None, None, None, None, None);
+
+        assert_eq!(engine.compat.image_input(), ImageInputCapability::Unknown);
+        assert!(changes.iter().any(|change| change.contains("image input")));
+    }
+
+    #[test]
+    fn set_config_applies_host_resolved_image_capability_with_model() {
+        let mut engine = make_engine("old-model");
+
+        let changes = engine.apply_config_update(
+            Some("vision-model".into()),
+            Some(ImageInputCapability::Supported),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(engine.model, "vision-model");
+        assert_eq!(engine.compat.image_input(), ImageInputCapability::Supported);
+        assert!(changes.iter().any(|change| change.contains("image input")));
     }
 
     // --- Cycle 2: Effort config tests ---
@@ -132,7 +166,7 @@ mod tests_set_config {
     fn set_config_changes_effort() {
         let mut engine = make_engine_with_compat("m", ProviderCompat::openai_defaults());
         assert!(engine.reasoning_effort.is_none());
-        let changes = engine.apply_config_update(None, None, None, Some("high".into()), None);
+        let changes = engine.apply_config_update(None, None, None, None, Some("high".into()), None);
         assert_eq!(engine.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(changes.len(), 1);
         assert!(changes[0].contains("high"));
@@ -142,7 +176,7 @@ mod tests_set_config {
     fn set_config_clears_effort_with_empty_string() {
         let mut engine = make_engine("m");
         engine.reasoning_effort = Some("high".into());
-        let changes = engine.apply_config_update(None, None, None, Some(String::new()), None);
+        let changes = engine.apply_config_update(None, None, None, None, Some(String::new()), None);
         assert!(engine.reasoning_effort.is_none());
         assert_eq!(changes.len(), 1);
     }
@@ -152,7 +186,7 @@ mod tests_set_config {
     #[test]
     fn set_config_enables_thinking() {
         let mut engine = make_engine("m");
-        let changes = engine.apply_config_update(None, Some("enabled".into()), Some(16000), None, None);
+        let changes = engine.apply_config_update(None, None, Some("enabled".into()), Some(16000), None, None);
         match &engine.thinking {
             Some(aion_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
                 assert_eq!(*budget_tokens, 16000);
@@ -166,7 +200,7 @@ mod tests_set_config {
     fn set_config_disables_thinking() {
         let mut engine = make_engine("m");
         engine.thinking = Some(aion_types::llm::ThinkingConfig::Enabled { budget_tokens: 8000 });
-        let changes = engine.apply_config_update(None, Some("disabled".into()), None, None, None);
+        let changes = engine.apply_config_update(None, None, Some("disabled".into()), None, None, None);
         match &engine.thinking {
             Some(aion_types::llm::ThinkingConfig::Disabled) => {}
             other => panic!("expected Disabled, got: {other:?}"),
@@ -177,7 +211,7 @@ mod tests_set_config {
     #[test]
     fn set_config_thinking_enabled_default_budget() {
         let mut engine = make_engine("m");
-        let changes = engine.apply_config_update(None, Some("enabled".into()), None, None, None);
+        let changes = engine.apply_config_update(None, None, Some("enabled".into()), None, None, None);
         match &engine.thinking {
             Some(aion_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
                 assert!(*budget_tokens > 0);
@@ -191,7 +225,7 @@ mod tests_set_config {
     fn set_config_invalid_thinking_ignored() {
         let mut engine = make_engine("m");
         engine.thinking = Some(aion_types::llm::ThinkingConfig::Enabled { budget_tokens: 8000 });
-        let changes = engine.apply_config_update(None, Some("invalid_value".into()), None, None, None);
+        let changes = engine.apply_config_update(None, None, Some("invalid_value".into()), None, None, None);
         match &engine.thinking {
             Some(aion_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
                 assert_eq!(*budget_tokens, 8000);
@@ -218,6 +252,7 @@ mod tests_set_config {
         let mut engine = make_engine_with_compat("old-model", compat);
         let changes = engine.apply_config_update(
             Some("new-model".into()),
+            None,
             Some("enabled".into()),
             Some(12000),
             Some("low".into()),
@@ -240,7 +275,7 @@ mod tests_set_config {
     fn set_config_thinking_budget_only_updates_existing_enabled() {
         let mut engine = make_engine("m");
         engine.thinking = Some(aion_types::llm::ThinkingConfig::Enabled { budget_tokens: 5000 });
-        let changes = engine.apply_config_update(None, None, Some(20000), None, None);
+        let changes = engine.apply_config_update(None, None, None, Some(20000), None, None);
         match &engine.thinking {
             Some(aion_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
                 assert_eq!(*budget_tokens, 20000);
@@ -254,7 +289,7 @@ mod tests_set_config {
     fn set_config_thinking_budget_ignored_when_disabled() {
         let mut engine = make_engine("m");
         engine.thinking = Some(aion_types::llm::ThinkingConfig::Disabled);
-        let changes = engine.apply_config_update(None, None, Some(20000), None, None);
+        let changes = engine.apply_config_update(None, None, None, Some(20000), None, None);
         match &engine.thinking {
             Some(aion_types::llm::ThinkingConfig::Disabled) => {}
             other => panic!("expected Disabled unchanged, got: {other:?}"),
@@ -273,7 +308,7 @@ mod tests_set_config {
         };
         let mut engine = make_engine_with_compat("m", compat);
 
-        let changes = engine.apply_config_update(None, Some("enabled".into()), Some(16000), None, None);
+        let changes = engine.apply_config_update(None, None, Some("enabled".into()), Some(16000), None, None);
 
         match &engine.thinking {
             Some(aion_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
@@ -296,7 +331,7 @@ mod tests_set_config {
         };
         for value in ["low", "medium", "high", "max"] {
             let mut engine = make_engine_with_compat("m", compat.clone());
-            engine.apply_config_update(None, None, None, Some(value.to_string()), None);
+            engine.apply_config_update(None, None, None, None, Some(value.to_string()), None);
             assert_eq!(
                 engine.reasoning_effort.as_deref(),
                 Some(value),
@@ -310,7 +345,7 @@ mod tests_set_config {
     #[test]
     fn set_config_thinking_applies_when_capability_is_false() {
         let mut engine = make_engine_with_compat("m", ProviderCompat::openai_defaults());
-        let changes = engine.apply_config_update(None, Some("enabled".into()), None, None, None);
+        let changes = engine.apply_config_update(None, None, Some("enabled".into()), None, None, None);
         assert_eq!(changes, vec!["thinking: enabled (budget: 10000)"]);
         assert!(matches!(
             engine.thinking,
@@ -321,7 +356,7 @@ mod tests_set_config {
     #[test]
     fn set_config_effort_rejected_when_unsupported() {
         let mut engine = make_engine("m"); // anthropic defaults: supports_effort = false
-        let changes = engine.apply_config_update(None, None, None, Some("high".into()), None);
+        let changes = engine.apply_config_update(None, None, None, None, Some("high".into()), None);
         assert!(changes.iter().any(|c| c.contains("not supported")));
         assert!(engine.reasoning_effort.is_none());
     }
@@ -329,7 +364,7 @@ mod tests_set_config {
     #[test]
     fn set_config_effort_rejected_invalid_level() {
         let mut engine = make_engine_with_compat("m", ProviderCompat::openai_defaults());
-        let changes = engine.apply_config_update(None, None, None, Some("max".into()), None);
+        let changes = engine.apply_config_update(None, None, None, None, Some("max".into()), None);
         assert!(changes.iter().any(|c| c.contains("invalid")));
         assert!(engine.reasoning_effort.is_none());
     }
@@ -338,7 +373,7 @@ mod tests_set_config {
     fn set_config_effort_clear_always_works() {
         let mut engine = make_engine("m"); // anthropic defaults: supports_effort = false
         engine.reasoning_effort = Some("high".into());
-        let changes = engine.apply_config_update(None, None, None, Some(String::new()), None);
+        let changes = engine.apply_config_update(None, None, None, None, Some(String::new()), None);
         assert!(engine.reasoning_effort.is_none());
         assert!(changes.iter().any(|c| c.contains("cleared")));
     }
@@ -399,6 +434,7 @@ mod tests_phase6 {
             max_tool_call_malformed_turns: 3,
             max_tool_call_failure_turns: 3,
             tools: ToolRegistry::new(),
+            tool_policy: Default::default(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, allow_list.clone()))),
             allow_list,
             hooks: None,
@@ -550,7 +586,7 @@ mod tests_compact {
     use aion_providers::provider::LlmProvider;
     use aion_tools::registry::ToolRegistry;
     use aion_types::llm::{LlmEvent, LlmRequest};
-    use aion_types::message::{ContentBlock, Message, Role, TokenUsage};
+    use aion_types::message::{ContentBlock, ImageInputCapability, ImageUrl, Message, Role, TokenUsage};
     use serde_json::json;
 
     use super::{CompactLevel, ProviderCompat};
@@ -610,6 +646,19 @@ mod tests_compact {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingRejectingProvider {
+        requests: Mutex<Vec<LlmRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for RecordingRejectingProvider {
+        async fn stream(&self, request: &LlmRequest) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Err(ProviderError::Connection("intentional test failure".to_owned()))
+        }
+    }
+
     fn make_compact_engine(
         compact_config: CompactConfig,
         compact_state: CompactState,
@@ -639,6 +688,7 @@ mod tests_compact {
             max_tool_call_malformed_turns: 3,
             max_tool_call_failure_turns: 3,
             tools: ToolRegistry::new(),
+            tool_policy: Default::default(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
             allow_list: vec![],
             hooks: None,
@@ -924,6 +974,53 @@ mod tests_compact {
         assert_eq!(engine.compact_state.last_input_tokens, 0);
     }
 
+    #[tokio::test]
+    async fn autocompact_projects_images_without_mutating_failed_history() {
+        let config = CompactConfig {
+            context_window: 100,
+            emergency_buffer: 10,
+            autocompact_threshold_pct: Some(50),
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 60;
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "Attachment path: /tmp/image.png".to_owned(),
+                },
+                ContentBlock::Image {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,abcd".to_owned(),
+                    },
+                },
+            ],
+        )];
+        let provider = Arc::new(RecordingRejectingProvider::default());
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = provider.clone();
+        engine.compat.image_input = Some(ImageInputCapability::Unsupported);
+
+        engine.run_compaction().await.unwrap();
+
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .all(|block| !matches!(block, ContentBlock::Image { .. }))
+        );
+        assert!(
+            engine.messages[0]
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        );
+    }
+
     // -- Circuit broken prevents autocompact, emergency still fires --
 
     #[tokio::test]
@@ -1005,6 +1102,7 @@ mod tests_plan_mode {
             max_tool_call_malformed_turns: 3,
             max_tool_call_failure_turns: 3,
             tools: ToolRegistry::new(),
+            tool_policy: Default::default(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, allow_list.clone()))),
             allow_list,
             hooks: None,
@@ -1164,16 +1262,20 @@ mod tests_plan_mode {
 mod tests_handle_command {
     use std::sync::{Arc, Mutex};
 
+    use aion_config::compact::CompactConfig;
     use aion_providers::error::ProviderError;
     use aion_providers::provider::LlmProvider;
     use aion_tools::registry::ToolRegistry;
     use aion_types::llm::{LlmEvent, LlmRequest};
-    use aion_types::message::{ContentBlock, Message, Role};
+    use aion_types::message::{ContentBlock, ImageInputCapability, ImageUrl, Message, Role, StopReason, TokenUsage};
+    use tokio::sync::mpsc::{Receiver, channel};
 
-    use super::{CompactLevel, ProviderCompat};
+    use super::{AgentEngine, AgentError, CacheBreakDetector, CompactLevel, ProviderCompat};
+    use crate::commands::default_registry;
     use crate::compact::state::CompactState;
     use crate::confirm::ToolConfirmer;
     use crate::output::OutputSink;
+    use crate::turn::TurnKind;
 
     struct NullOutput;
     impl OutputSink for NullOutput {
@@ -1190,14 +1292,14 @@ mod tests_handle_command {
     struct NullProvider;
     #[async_trait::async_trait]
     impl LlmProvider for NullProvider {
-        async fn stream(&self, _: &LlmRequest) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        async fn stream(&self, _: &LlmRequest) -> Result<Receiver<LlmEvent>, ProviderError> {
+            let (_tx, rx) = channel(1);
             Ok(rx)
         }
     }
 
-    fn make_engine() -> super::AgentEngine {
-        super::AgentEngine {
+    fn make_engine() -> AgentEngine {
+        AgentEngine {
             provider: Arc::new(NullProvider),
             model: "test-model".to_string(),
             max_tokens: Some(4096),
@@ -1212,6 +1314,7 @@ mod tests_handle_command {
             max_tool_call_malformed_turns: 3,
             max_tool_call_failure_turns: 3,
             tools: ToolRegistry::new(),
+            tool_policy: Default::default(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
             allow_list: vec![],
             hooks: None,
@@ -1220,14 +1323,14 @@ mod tests_handle_command {
             output: Arc::new(NullOutput),
             approval_manager: None,
             protocol_writer: None,
-            compact_config: aion_config::compact::CompactConfig::default(),
+            compact_config: CompactConfig::default(),
             compact_state: CompactState::new(),
             compact_level: CompactLevel::default(),
             toon_enabled: false,
             plan_state: Default::default(),
             plan_active_flag: None,
-            cache_detector: super::CacheBreakDetector::new(),
-            commands: crate::commands::default_registry(),
+            cache_detector: CacheBreakDetector::new(),
+            commands: default_registry(),
         }
     }
 
@@ -1235,14 +1338,14 @@ mod tests_handle_command {
     async fn handle_command_quit() {
         let mut engine = make_engine();
         let err = engine.handle_command("/quit").await.unwrap_err();
-        assert!(matches!(err, super::AgentError::UserAborted));
+        assert!(matches!(err, AgentError::UserAborted));
     }
 
     #[tokio::test]
     async fn handle_command_exit_alias() {
         let mut engine = make_engine();
         let err = engine.handle_command("/exit").await.unwrap_err();
-        assert!(matches!(err, super::AgentError::UserAborted));
+        assert!(matches!(err, AgentError::UserAborted));
     }
 
     #[tokio::test]
@@ -1300,7 +1403,7 @@ mod tests_handle_command {
     async fn run_intercepts_quit_returns_user_aborted() {
         let mut engine = make_engine();
         let err = engine.run("/quit", "msg-1").await.unwrap_err();
-        assert!(matches!(err, super::AgentError::UserAborted));
+        assert!(matches!(err, AgentError::UserAborted));
     }
 
     #[test]
@@ -1313,6 +1416,182 @@ mod tests_handle_command {
         assert!(names.contains(&"compact"));
         assert!(names.contains(&"clear"));
         assert!(names.contains(&"quit"));
+    }
+
+    // --- run() text-only behavior ---
+
+    struct SingleResponseProvider;
+    #[async_trait::async_trait]
+    impl LlmProvider for SingleResponseProvider {
+        async fn stream(&self, _: &LlmRequest) -> Result<Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = channel(2);
+            let _ = tx.send(LlmEvent::TextDelta("hello".to_string())).await;
+            let _ = tx
+                .send(LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage::default(),
+                })
+                .await;
+            Ok(rx)
+        }
+    }
+
+    fn make_engine_with_provider(provider: Arc<dyn LlmProvider>) -> AgentEngine {
+        let mut engine = make_engine();
+        engine.provider = provider;
+        engine.max_turns_per_run = Some(1);
+        engine
+    }
+
+    #[tokio::test]
+    async fn run_treats_aion_files_marker_as_plain_text() {
+        let mut engine = make_engine_with_provider(Arc::new(SingleResponseProvider));
+        let input = "discuss [[AION_FILES]] and file.txt";
+        let _ = engine.run(input, "msg-1").await;
+
+        let user_msg = engine
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .expect("user message");
+        assert_eq!(user_msg.content.len(), 1);
+        match &user_msg.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, input),
+            _ => panic!("expected plain text block, got {:?}", user_msg.content[0]),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_blocks_accepts_image_blocks() {
+        let mut engine = make_engine_with_provider(Arc::new(SingleResponseProvider));
+        engine.compat.image_input = Some(ImageInputCapability::Supported);
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "look at this".to_string(),
+            },
+            ContentBlock::Image {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,abcd".to_string(),
+                },
+            },
+        ];
+        let _ = engine.run_with_blocks(blocks.clone(), "msg-2").await;
+
+        let user_msg = engine
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .expect("user message");
+        assert_eq!(user_msg.content.len(), 2);
+        assert!(matches!(user_msg.content[0], ContentBlock::Text { .. }));
+        assert!(matches!(user_msg.content[1], ContentBlock::Image { .. }));
+    }
+
+    #[tokio::test]
+    async fn run_with_blocks_keeps_unsupported_image_in_history() {
+        let mut engine = make_engine_with_provider(Arc::new(SingleResponseProvider));
+        engine.compat.image_input = Some(ImageInputCapability::Unsupported);
+        let blocks = vec![ContentBlock::Image {
+            image_url: ImageUrl {
+                url: "data:image/png;base64,abcd".to_owned(),
+            },
+        }];
+
+        engine.run_with_blocks(blocks, "msg-3").await.unwrap();
+
+        assert!(engine.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        }));
+    }
+
+    #[test]
+    fn build_request_omits_invalid_image_without_mutating_history() {
+        let mut engine = make_engine();
+        engine.compat.image_input = Some(ImageInputCapability::Supported);
+        engine.messages.push(Message::new(
+            Role::User,
+            vec![ContentBlock::Image {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,!!!".to_owned(),
+                },
+            }],
+        ));
+
+        let request = engine.build_request(TurnKind::Normal);
+
+        assert!(matches!(request.messages[0].content[0], ContentBlock::Text { .. }));
+        assert!(matches!(engine.messages[0].content[0], ContentBlock::Image { .. }));
+    }
+
+    #[test]
+    fn model_switch_projects_historical_snapshot_for_current_capability() {
+        let mut engine = make_engine();
+        engine.compat.image_input = Some(ImageInputCapability::Supported);
+        engine.messages.push(Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "Attachment path: /tmp/image.png".to_owned(),
+                },
+                ContentBlock::Image {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,abcd".to_owned(),
+                    },
+                },
+            ],
+        ));
+        engine.model = "text-only-model".to_owned();
+        engine.compat.image_input = Some(ImageInputCapability::Unsupported);
+
+        let request = engine.build_request(TurnKind::Normal);
+
+        assert_eq!(request.model, "text-only-model");
+        assert!(
+            request.messages[0]
+                .content
+                .iter()
+                .all(|block| !matches!(block, ContentBlock::Image { .. }))
+        );
+        assert!(
+            request.messages[0]
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("/tmp/image.png")))
+        );
+        assert!(
+            request.messages[0]
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("does not support vision")))
+        );
+        assert_eq!(engine.messages.len(), 1);
+        assert!(
+            engine.messages[0]
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        );
+    }
+
+    #[test]
+    fn unknown_capability_uses_text_only_request_projection() {
+        let mut engine = make_engine();
+        engine.messages.push(Message::new(
+            Role::User,
+            vec![ContentBlock::Image {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,abcd".to_owned(),
+                },
+            }],
+        ));
+
+        let request = engine.build_request(TurnKind::Normal);
+
+        assert!(matches!(request.messages[0].content[0], ContentBlock::Text { .. }));
+        assert!(matches!(engine.messages[0].content[0], ContentBlock::Image { .. }));
     }
 }
 
@@ -1327,16 +1606,27 @@ mod tests_loop_helpers {
 
     use super::{AgentError, merge_tool_results, tool_call_malformed_fingerprint};
     use crate::stream::StreamOutcome;
-    use crate::tool_call::{DEFAULT_MAX_TOOL_CALL_FAILURE, ToolCallMalformedReason};
+    use crate::tool_call::{
+        DEFAULT_MAX_TOOL_CALL_FAILURE, ToolCallFailureFingerprint, ToolCallMalformedReason,
+        tool_call_failure_fingerprint,
+    };
     use crate::turn::{FinalizationReason, TurnGuardAction, TurnGuards, TurnKind, TurnOutcome};
 
     fn tool_use(id: &str, name: &str) -> ContentBlock {
+        tool_use_with_input(id, name, json!({}))
+    }
+
+    fn tool_use_with_input(id: &str, name: &str, input: serde_json::Value) -> ContentBlock {
         ContentBlock::ToolUse {
             id: id.to_string(),
             name: name.to_string(),
-            input: json!({}),
+            input,
             extra: None,
         }
+    }
+
+    fn failed_exec_fingerprint() -> Option<ToolCallFailureFingerprint> {
+        tool_call_failure_fingerprint(&[tool_use("call", "ExecCommand")])
     }
 
     fn executed_result(id: &str) -> ContentBlock {
@@ -1357,7 +1647,8 @@ mod tests_loop_helpers {
         let executed = vec![executed_result("ok1"), executed_result("ok2")];
         let modifiers = vec![None, None];
 
-        let (results, mods) = merge_tool_results(&calls, &reasons, executed, modifiers);
+        let denied = vec![None, None, None];
+        let (results, mods) = merge_tool_results(&calls, &reasons, &denied, executed, modifiers);
 
         assert_eq!(results.len(), 3);
         // Slot 0: synthetic malformed error result for "bad".
@@ -1385,7 +1676,8 @@ mod tests_loop_helpers {
             Some(ToolCallMalformedReason::EmptyFunctionName),
         ];
 
-        let (results, mods) = merge_tool_results(&calls, &reasons, Vec::new(), Vec::new());
+        let denied = vec![None, None];
+        let (results, mods) = merge_tool_results(&calls, &reasons, &denied, Vec::new(), Vec::new());
 
         assert_eq!(results.len(), 2);
         assert!(
@@ -1393,6 +1685,30 @@ mod tests_loop_helpers {
                 .iter()
                 .all(|r| matches!(r, ContentBlock::ToolResult { is_error: true, .. }))
         );
+        assert!(mods.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn merge_interleaves_policy_denial_without_executing_it() {
+        let calls = vec![tool_use("denied", "ExecCommand"), tool_use("ok", "Read")];
+        let reasons = vec![None, None];
+        let denied = vec![Some("ExecCommand".to_string()), None];
+        let executed = vec![executed_result("ok")];
+
+        let (results, mods) = merge_tool_results(&calls, &reasons, &denied, executed, vec![None]);
+
+        assert!(matches!(
+            &results[0],
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error: true,
+            } if tool_use_id == "denied" && content.contains("not available")
+        ));
+        assert!(matches!(
+            &results[1],
+            ContentBlock::ToolResult { tool_use_id, is_error: false, .. } if tool_use_id == "ok"
+        ));
         assert!(mods.iter().all(Option::is_none));
     }
 
@@ -1417,11 +1733,14 @@ mod tests_loop_helpers {
         let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
         // First N-1 tool-call-failure rounds: no stop yet.
         for _ in 0..DEFAULT_MAX_TOOL_CALL_FAILURE - 1 {
-            assert!(matches!(guards.after_tool_round(None, true), TurnGuardAction::Continue));
+            assert!(matches!(
+                guards.after_tool_round(None, failed_exec_fingerprint()),
+                TurnGuardAction::Continue
+            ));
         }
         // The Nth consecutive tool-call-failure round trips the breaker.
         assert!(matches!(
-            guards.after_tool_round(None, true),
+            guards.after_tool_round(None, failed_exec_fingerprint()),
             TurnGuardAction::Stop(AgentError::ToolCallFailures { .. })
         ));
     }
@@ -1429,25 +1748,44 @@ mod tests_loop_helpers {
     #[test]
     fn after_tool_round_resets_tool_call_failure_streak_on_success() {
         let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
-        assert!(matches!(guards.after_tool_round(None, true), TurnGuardAction::Continue));
-        // A non-error tool round resets the streak.
         assert!(matches!(
-            guards.after_tool_round(None, false),
+            guards.after_tool_round(None, failed_exec_fingerprint()),
             TurnGuardAction::Continue
         ));
+        // A non-error tool round resets the streak.
+        assert!(matches!(guards.after_tool_round(None, None), TurnGuardAction::Continue));
         assert_eq!(guards.tool_call_failure_count(), 0);
         // So a single subsequent tool-call-failure round must not trip the breaker.
-        assert!(matches!(guards.after_tool_round(None, true), TurnGuardAction::Continue));
+        assert!(matches!(
+            guards.after_tool_round(None, failed_exec_fingerprint()),
+            TurnGuardAction::Continue
+        ));
+    }
+
+    #[test]
+    fn after_tool_round_does_not_trip_failure_breaker_for_different_tool_inputs() {
+        let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
+
+        for index in 0..DEFAULT_MAX_TOOL_CALL_FAILURE {
+            let fingerprint = tool_call_failure_fingerprint(&[tool_use_with_input(
+                &format!("call-{index}"),
+                "ExecCommand",
+                json!({ "cmd": format!("command-{index}") }),
+            )]);
+
+            assert!(matches!(
+                guards.after_tool_round(None, fingerprint),
+                TurnGuardAction::Continue
+            ));
+            assert_eq!(guards.tool_call_failure_count(), 1);
+        }
     }
 
     #[test]
     fn after_tool_round_requests_finalize_when_budget_is_exhausted() {
         let mut guards = TurnGuards::new(Some(1), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
         guards.record_counted_turn();
-        assert!(matches!(
-            guards.after_tool_round(None, false),
-            TurnGuardAction::Finalize
-        ));
+        assert!(matches!(guards.after_tool_round(None, None), TurnGuardAction::Finalize));
     }
 
     #[test]
@@ -1460,7 +1798,7 @@ mod tests_loop_helpers {
         let fingerprint = tool_call_malformed_fingerprint(&calls, &reasons);
 
         assert!(matches!(
-            guards.after_tool_round(fingerprint, false),
+            guards.after_tool_round(fingerprint, None),
             TurnGuardAction::Stop(AgentError::ToolCallMalformed { count: 1, limit: 1 })
         ));
     }
@@ -1540,5 +1878,201 @@ mod tests_loop_helpers {
         let outcome = stream_outcome("   ", StopReason::EndTurn, Vec::new());
 
         assert!(matches!(TurnOutcome::from_stream(outcome), TurnOutcome::EmptyFinal(_)));
+    }
+}
+
+#[cfg(test)]
+mod tests_tool_policy_enforcement {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use aion_protocol::events::ToolCategory;
+    use aion_providers::error::ProviderError;
+    use aion_providers::provider::LlmProvider;
+    use aion_tools::Tool;
+    use aion_tools::registry::ToolRegistry;
+    use aion_types::llm::{LlmEvent, LlmRequest};
+    use aion_types::message::{ContentBlock, ImageInputCapability};
+    use aion_types::tool::ToolResult;
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+
+    use super::{AgentEngine, CacheBreakDetector, CompactLevel, CompactState, ProviderCompat};
+    use crate::commands::default_registry;
+    use crate::confirm::ToolConfirmer;
+    use crate::output::OutputSink;
+    use crate::tool_policy::ToolPolicy;
+    use crate::turn::TurnKind;
+
+    struct NullOutput;
+
+    impl OutputSink for NullOutput {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
+        fn emit_error(&self, _: &str) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
+    struct NullProvider;
+
+    #[async_trait]
+    impl LlmProvider for NullProvider {
+        async fn stream(&self, _: &LlmRequest) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+    }
+
+    struct CountingTool {
+        name: &'static str,
+        executions: Arc<AtomicUsize>,
+        requires_image_input: bool,
+    }
+
+    #[async_trait]
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "count executions"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _: &Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _: Value) -> ToolResult {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            ToolResult {
+                content: "ok".to_string(),
+                is_error: false,
+            }
+        }
+
+        fn requires_image_input(&self) -> bool {
+            self.requires_image_input
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+    }
+
+    fn make_engine(read_executions: Arc<AtomicUsize>, exec_executions: Arc<AtomicUsize>) -> AgentEngine {
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(CountingTool {
+            name: "Read",
+            executions: read_executions,
+            requires_image_input: false,
+        }));
+        tools.register(Box::new(CountingTool {
+            name: "ExecCommand",
+            executions: exec_executions,
+            requires_image_input: false,
+        }));
+
+        AgentEngine {
+            provider: Arc::new(NullProvider),
+            compat: ProviderCompat::anthropic_defaults(),
+            thinking: None,
+            system_prompt: String::new(),
+            model: "test-model".to_string(),
+            reasoning_effort: None,
+            messages: Vec::new(),
+            total_usage: Default::default(),
+            msg_id: "test-message".to_string(),
+            max_tokens: Some(4096),
+            max_turns_per_run: Some(10),
+            max_tool_call_malformed_turns: 3,
+            max_tool_call_failure_turns: 3,
+            tools,
+            tool_policy: ToolPolicy::allow_only(["Read"]),
+            confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
+            allow_list: vec![],
+            hooks: None,
+            session_manager: None,
+            current_session: None,
+            output: Arc::new(NullOutput),
+            approval_manager: None,
+            protocol_writer: None,
+            compact_config: Default::default(),
+            compact_state: CompactState::new(),
+            compact_level: CompactLevel::default(),
+            toon_enabled: false,
+            plan_state: Default::default(),
+            plan_active_flag: None,
+            cache_detector: CacheBreakDetector::new(),
+            commands: default_registry(),
+        }
+    }
+
+    fn tool_use(id: &str, name: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: json!({}),
+            extra: None,
+        }
+    }
+
+    #[test]
+    fn build_request_only_advertises_policy_allowed_tools() {
+        let mut engine = make_engine(Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+
+        let request = engine.build_request(TurnKind::Normal);
+        let tool_names: Vec<_> = request.tools.iter().map(|tool| tool.name.as_str()).collect();
+
+        assert_eq!(tool_names, vec!["Read"]);
+    }
+
+    #[test]
+    fn build_request_only_advertises_image_tool_to_supported_models() {
+        let image_executions = Arc::new(AtomicUsize::new(0));
+        let mut engine = make_engine(Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        engine.tools.register(Box::new(CountingTool {
+            name: "ViewImage",
+            executions: image_executions,
+            requires_image_input: true,
+        }));
+        engine.tool_policy = ToolPolicy::allow_only(["Read", "ViewImage"]);
+        engine.compat.image_input = Some(ImageInputCapability::Unsupported);
+
+        let text_only_request = engine.build_request(TurnKind::Normal);
+        assert!(text_only_request.tools.iter().all(|tool| tool.name != "ViewImage"));
+
+        engine.compat.image_input = Some(ImageInputCapability::Supported);
+        let vision_request = engine.build_request(TurnKind::Normal);
+        assert!(vision_request.tools.iter().any(|tool| tool.name == "ViewImage"));
+    }
+
+    #[tokio::test]
+    async fn execute_tool_round_rejects_denied_tools_before_execution() {
+        let read_executions = Arc::new(AtomicUsize::new(0));
+        let exec_executions = Arc::new(AtomicUsize::new(0));
+        let mut engine = make_engine(Arc::clone(&read_executions), Arc::clone(&exec_executions));
+        let calls = vec![tool_use("denied", "ExecCommand"), tool_use("allowed", "Read")];
+
+        let output = engine.execute_tool_round(&calls, "").await.unwrap();
+
+        assert_eq!(exec_executions.load(Ordering::SeqCst), 0);
+        assert_eq!(read_executions.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            &output.tool_results[0],
+            ContentBlock::ToolResult { is_error: true, content, .. } if content.contains("not available")
+        ));
+        assert!(matches!(
+            &output.tool_results[1],
+            ContentBlock::ToolResult { is_error: false, .. }
+        ));
     }
 }

@@ -2,6 +2,8 @@ use super::*;
 
 #[cfg(test)]
 mod tests {
+    use aion_types::message::ImageInputCapability;
+
     use super::*;
     use crate::events::{Capabilities, ProtocolEvent};
 
@@ -18,6 +20,7 @@ mod tests {
             session_id: None,
             capabilities: Capabilities {
                 tool_approval: true,
+                image_input: ImageInputCapability::Unknown,
                 thinking: false,
                 effort: false,
                 effort_levels: vec![],

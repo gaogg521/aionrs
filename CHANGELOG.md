@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.2.5](https://github.com/iOfficeAI/aionrs/compare/v0.2.4...v0.2.5) (2026-07-17)
+
+
+### Features
+
+* add image content block support for Aion CLI ([e362e0a](https://github.com/iOfficeAI/aionrs/commit/e362e0a6eb57ff39b190077c49c1a808361754d7))
+* **agent:** route images through capability-aware view tool ([3c28b34](https://github.com/iOfficeAI/aionrs/commit/3c28b3457e175fd331df37512c6d78f02f84b83e))
+
+
+### Bug Fixes
+
+* **agent:** harden image input handling ([d8905c0](https://github.com/iOfficeAI/aionrs/commit/d8905c0b9a2f9c5d97804426d7bba820d50a6b29))
+* **cli:** declare direct aion-types dependency ([43ddbf7](https://github.com/iOfficeAI/aionrs/commit/43ddbf741774efaa35f503736dacf79c5b4fb014))
+
+## [0.2.4](https://github.com/iOfficeAI/aionrs/compare/v0.2.3...v0.2.4) (2026-07-14)
+
+
+### Bug Fixes
+
+* **agent:** enforce runtime tool policies ([c504789](https://github.com/iOfficeAI/aionrs/commit/c504789c5ab6bcaf8ad725ac87a0adedc25a4c1e))
+* **agent:** enforce runtime tool policies ([609e6e5](https://github.com/iOfficeAI/aionrs/commit/609e6e592700a67657d79067992753ea5dceb8ff))
+* **agent:** inherit tool policy in sub-agents ([6626b61](https://github.com/iOfficeAI/aionrs/commit/6626b61a8b5c43feac8b43ce47423a84614efec3))
+* **agent:** scope tool search to runtime policy ([29ba1ab](https://github.com/iOfficeAI/aionrs/commit/29ba1ab511aec2e2ccff3236a0014a726fe26120))
+
+## [0.2.3](https://github.com/iOfficeAI/aionrs/compare/v0.2.2...v0.2.3) (2026-07-13)
+
+
+### Bug Fixes
+
+* **agent:** fingerprint tool-call failure breaker ([299853b](https://github.com/iOfficeAI/aionrs/commit/299853b348c0f3146369afff48fe9af7ace55ba4))
+* **agent:** fingerprint tool-call failure breaker ([5d86fe5](https://github.com/iOfficeAI/aionrs/commit/5d86fe51e4ecf2149f951ef29f3cd39d268741fd))
+
 ## [0.2.2](https://github.com/iOfficeAI/aionrs/compare/v0.2.1...v0.2.2) (2026-07-09)
 
 

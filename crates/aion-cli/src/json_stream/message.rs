@@ -11,19 +11,21 @@ use aion_protocol::ToolApprovalResult;
 use aion_protocol::commands::ProtocolCommand;
 use aion_protocol::events::ProtocolEvent;
 use aion_protocol::writer::ProtocolEmitter;
+use aion_types::message::ImageInputCapability;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::context::StreamContext;
 
 /// Pending config fields queued via `SetConfig` while a message is in
-/// flight: (model, thinking, thinking_budget, effort, compaction).
-type PendingConfig = (
-    Option<String>,
-    Option<String>,
-    Option<u32>,
-    Option<String>,
-    Option<String>,
-);
+/// flight.
+struct PendingConfig {
+    model: Option<String>,
+    image_input: Option<ImageInputCapability>,
+    thinking: Option<String>,
+    thinking_budget: Option<u32>,
+    effort: Option<String>,
+    compaction: Option<String>,
+}
 
 /// Run the engine on `content`, racing it against control commands on
 /// `cmd_rx`. Returns `true` if a `Stop` command was received while the
@@ -76,8 +78,22 @@ pub(super) async fn handle(
                             stopped = true;
                             break;
                         }
-                        ProtocolCommand::SetConfig { model, thinking, thinking_budget, effort, compaction } => {
-                            pending_config = Some((model, thinking, thinking_budget, effort, compaction));
+                        ProtocolCommand::SetConfig {
+                            model,
+                            image_input,
+                            thinking,
+                            thinking_budget,
+                            effort,
+                            compaction,
+                        } => {
+                            pending_config = Some(PendingConfig {
+                                model,
+                                image_input,
+                                thinking,
+                                thinking_budget,
+                                effort,
+                                compaction,
+                            });
                             let _ = ctx.writer.emit(&ProtocolEvent::Info {
                                 msg_id: String::new(),
                                 message: "set_config: queued, will apply after current response".to_string(),
@@ -103,8 +119,15 @@ pub(super) async fn handle(
         }
     }
 
-    if let Some((model, thinking, thinking_budget, effort, compaction)) = pending_config.take() {
-        let changes = engine.apply_config_update(model, thinking, thinking_budget, effort, compaction);
+    if let Some(config) = pending_config.take() {
+        let changes = engine.apply_config_update(
+            config.model,
+            config.image_input,
+            config.thinking,
+            config.thinking_budget,
+            config.effort,
+            config.compaction,
+        );
         if !changes.is_empty() {
             let _ = ctx.writer.emit(&ProtocolEvent::Info {
                 msg_id: String::new(),

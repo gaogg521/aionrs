@@ -40,6 +40,7 @@ impl ProtocolSink {
     fn build_capabilities(compat: &ProviderCompat, has_mcp: bool, current_mode: &str) -> Capabilities {
         Capabilities {
             tool_approval: true,
+            image_input: compat.image_input(),
             thinking: compat.supports_thinking(),
             effort: compat.supports_effort(),
             effort_levels: compat.effort_levels().to_vec(),

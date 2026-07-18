@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use aion_types::message::ImageInputCapability;
 use serde::Deserialize;
 
 /// Commands sent from the client to the agent (Client -> Agent)
@@ -33,6 +34,8 @@ pub enum ProtocolCommand {
     SetConfig {
         #[serde(default)]
         model: Option<String>,
+        #[serde(default)]
+        image_input: Option<ImageInputCapability>,
         #[serde(default)]
         thinking: Option<String>,
         #[serde(default)]

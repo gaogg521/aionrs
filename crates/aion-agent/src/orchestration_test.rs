@@ -66,11 +66,9 @@ mod tests {
             "required": ["tasks"]
         });
         let input = json!({});
-        let (result, promoted) = maybe_append_deferred_hint("Missing or invalid 'tasks' array", schema, &input);
+        let result = maybe_append_deferred_hint("Missing or invalid 'tasks' array", schema, &input);
         assert!(result.contains("Missing or invalid 'tasks' array"));
-        assert!(result.contains("full schema has NOW been loaded"));
-        assert!(result.contains("tasks"));
-        assert!(promoted);
+        assert!(result.contains("ToolSearch"));
     }
 
     #[test]
@@ -81,9 +79,9 @@ mod tests {
             "required": ["tasks"]
         });
         let input = json!({"tasks": [{"name": "t1", "prompt": "do x"}]});
-        let (result, promoted) = maybe_append_deferred_hint("Some runtime error", schema, &input);
+        let result = maybe_append_deferred_hint("Some runtime error", schema, &input);
         assert_eq!(result, "Some runtime error");
-        assert!(!promoted);
+        assert!(!result.contains("ToolSearch"));
     }
 
     #[test]
@@ -93,9 +91,8 @@ mod tests {
             "properties": {}
         });
         let input = json!({});
-        let (result, promoted) = maybe_append_deferred_hint("some error", schema, &input);
+        let result = maybe_append_deferred_hint("some error", schema, &input);
         assert_eq!(result, "some error");
-        assert!(!promoted);
     }
 
     #[test]
@@ -106,9 +103,8 @@ mod tests {
             "required": []
         });
         let input = json!({});
-        let (result, promoted) = maybe_append_deferred_hint("some error", schema, &input);
+        let result = maybe_append_deferred_hint("some error", schema, &input);
         assert_eq!(result, "some error");
-        assert!(!promoted);
     }
 
     #[test]
@@ -122,9 +118,8 @@ mod tests {
             "required": ["a", "b"]
         });
         let input = json!({"a": "present"});
-        let (result, promoted) = maybe_append_deferred_hint("validation failed", schema, &input);
-        assert!(result.contains("\"b\"") || result.contains(" b"));
-        assert!(promoted);
+        let result = maybe_append_deferred_hint("validation failed", schema, &input);
+        assert!(result.contains("ToolSearch"));
     }
 
     // -- execute_single integration tests (deferred tool hint) ----------------
@@ -229,22 +224,16 @@ mod tests {
             input: json!({}),
             extra: None,
         };
-        let (result, _) = execute_single(&registry, &call, None, aion_compact::CompactLevel::Off, false).await;
+        let (result, _, follow_up_blocks) =
+            execute_single(&registry, &call, None, aion_compact::CompactLevel::Off, false).await;
+        assert!(follow_up_blocks.is_empty());
         if let ContentBlock::ToolResult { content, is_error, .. } = &result {
             assert!(is_error);
             assert!(content.contains("Missing or invalid 'tasks' array"));
-            assert!(content.contains("full schema has NOW been loaded"));
+            assert!(content.contains("ToolSearch"));
         } else {
             panic!("expected ToolResult");
         }
-        // The failed deferred call must promote the tool: subsequent requests
-        // declare it with its full schema.
-        let def = registry
-            .to_tool_defs()
-            .into_iter()
-            .find(|d| d.name == "MockDeferred")
-            .unwrap();
-        assert!(!def.deferred, "failed deferred call should promote the schema");
     }
 
     #[tokio::test]
@@ -257,7 +246,9 @@ mod tests {
             input: json!({"tasks": "not_an_array"}),
             extra: None,
         };
-        let (result, _) = execute_single(&registry, &call, None, aion_compact::CompactLevel::Off, false).await;
+        let (result, _, follow_up_blocks) =
+            execute_single(&registry, &call, None, aion_compact::CompactLevel::Off, false).await;
+        assert!(follow_up_blocks.is_empty());
         if let ContentBlock::ToolResult { content, is_error, .. } = &result {
             // Tool succeeds because input.get("tasks") is Some
             assert!(!is_error);
@@ -276,7 +267,9 @@ mod tests {
             input: json!({"tasks": [{"name": "t1", "prompt": "do x"}]}),
             extra: None,
         };
-        let (result, _) = execute_single(&registry, &call, None, aion_compact::CompactLevel::Off, false).await;
+        let (result, _, follow_up_blocks) =
+            execute_single(&registry, &call, None, aion_compact::CompactLevel::Off, false).await;
+        assert!(follow_up_blocks.is_empty());
         if let ContentBlock::ToolResult { content, is_error, .. } = &result {
             assert!(!is_error);
             assert_eq!(content, "ok");
@@ -294,7 +287,9 @@ mod tests {
             input: json!({}),
             extra: None,
         };
-        let (result, _) = execute_single(&registry, &call, None, aion_compact::CompactLevel::Off, false).await;
+        let (result, _, follow_up_blocks) =
+            execute_single(&registry, &call, None, aion_compact::CompactLevel::Off, false).await;
+        assert!(follow_up_blocks.is_empty());
         if let ContentBlock::ToolResult { content, is_error, .. } = &result {
             assert!(is_error);
             assert!(content.contains("Missing cmd"));

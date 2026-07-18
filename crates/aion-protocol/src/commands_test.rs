@@ -8,6 +8,7 @@ mod tests {
     fn set_config_debug_format() {
         let cmd = ProtocolCommand::SetConfig {
             model: Some("test-model".into()),
+            image_input: None,
             thinking: None,
             thinking_budget: None,
             effort: None,
@@ -22,6 +23,7 @@ mod tests {
     fn set_config_equality() {
         let a = ProtocolCommand::SetConfig {
             model: Some("m".into()),
+            image_input: None,
             thinking: None,
             thinking_budget: None,
             effort: None,
@@ -29,6 +31,7 @@ mod tests {
         };
         let b = ProtocolCommand::SetConfig {
             model: Some("m".into()),
+            image_input: None,
             thinking: None,
             thinking_budget: None,
             effort: None,
@@ -38,6 +41,7 @@ mod tests {
 
         let c = ProtocolCommand::SetConfig {
             model: None,
+            image_input: None,
             thinking: None,
             thinking_budget: None,
             effort: None,
@@ -50,6 +54,7 @@ mod tests {
     fn set_config_with_all_fields_equality() {
         let a = ProtocolCommand::SetConfig {
             model: Some("m".into()),
+            image_input: Some(aion_types::message::ImageInputCapability::Supported),
             thinking: Some("enabled".into()),
             thinking_budget: Some(8000),
             effort: Some("high".into()),
@@ -57,6 +62,7 @@ mod tests {
         };
         let b = ProtocolCommand::SetConfig {
             model: Some("m".into()),
+            image_input: Some(aion_types::message::ImageInputCapability::Supported),
             thinking: Some("enabled".into()),
             thinking_budget: Some(8000),
             effort: Some("high".into()),
@@ -69,6 +75,7 @@ mod tests {
     fn set_config_all_none_fields() {
         let cmd = ProtocolCommand::SetConfig {
             model: None,
+            image_input: None,
             thinking: None,
             thinking_budget: None,
             effort: None,

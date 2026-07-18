@@ -34,6 +34,7 @@ Emitted once after initialization completes. Client MUST wait for this before se
   "session_id": "a1b2c3",
   "capabilities": {
     "tool_approval": true,
+    "image_input": "supported",
     "thinking": true,
     "effort": false,
     "effort_levels": [],
@@ -49,6 +50,7 @@ Emitted once after initialization completes. Client MUST wait for this before se
 | `version` | string | Protocol version (semver) |
 | `session_id` | string? | Session ID (omitted when sessions are disabled in config) |
 | `capabilities.tool_approval` | bool | Whether agent supports pause-and-wait tool approval |
+| `capabilities.image_input` | string | Resolved image-input capability: `supported`, `unsupported`, or `unknown` |
 | `capabilities.thinking` | bool | Whether current provider supports extended thinking |
 | `capabilities.effort` | bool | Whether current provider supports reasoning_effort |
 | `capabilities.effort_levels` | string[] | Valid effort values (e.g., `["low", "medium", "high"]`). Empty when effort is false |
@@ -262,6 +264,7 @@ Emitted after a `set_config` command is processed. Contains the updated capabili
   "type": "config_changed",
   "capabilities": {
     "tool_approval": true,
+    "image_input": "unsupported",
     "thinking": false,
     "effort": true,
     "effort_levels": ["low", "medium", "high"],
@@ -409,12 +412,13 @@ Change the agent's approval mode for the session.
 
 ### 2.7 `set_config`
 
-Update model, thinking, or effort configuration at runtime.
+Update model and its host-resolved capabilities or request configuration at runtime.
 
 ```json
 {
   "type": "set_config",
   "model": "claude-opus-4",
+  "image_input": "supported",
   "thinking": "enabled",
   "thinking_budget": 16000,
   "effort": "high",
@@ -425,12 +429,15 @@ Update model, thinking, or effort configuration at runtime.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `model` | string | no | Switch to a different model |
+| `image_input` | string | no | Host-resolved capability for the selected model: `supported`, `unsupported`, or `unknown` |
 | `thinking` | string | no | `"enabled"` or `"disabled"` |
 | `thinking_budget` | number | no | Token budget for enabled thinking (default: 10000); sent on Anthropic requests and ignored by OpenAI-compatible requests |
 | `effort` | string | no | Reasoning effort level (e.g., `"low"`, `"medium"`, `"high"`) |
 | `compaction` | string | no | Output compaction level: `"off"`, `"safe"`, `"full"` |
 
 All fields are optional. Only provided fields are updated.
+
+When changing `model`, clients SHOULD send the matching `image_input` value in the same command. If `model` is provided without `image_input`, the agent resets image support to `unknown` rather than retaining the previous model's capability.
 
 > **Validation**: The agent validates `effort` values against the current provider's capabilities. Explicit `thinking` updates are applied as request intent; if the provider rejects the wire field, that provider error is surfaced during the model request. After processing, a `config_changed` event is always emitted with the updated capabilities.
 

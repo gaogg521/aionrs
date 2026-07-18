@@ -1,3 +1,4 @@
+use aion_types::message::ImageInputCapability;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -75,6 +76,7 @@ pub enum ProtocolEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct Capabilities {
     pub tool_approval: bool,
+    pub image_input: ImageInputCapability,
     pub thinking: bool,
     pub effort: bool,
     pub effort_levels: Vec<String>,

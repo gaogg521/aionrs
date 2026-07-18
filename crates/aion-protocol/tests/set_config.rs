@@ -1,4 +1,5 @@
 use aion_protocol::commands::ProtocolCommand;
+use aion_types::message::ImageInputCapability;
 
 #[test]
 fn parse_set_config_with_model() {
@@ -7,6 +8,19 @@ fn parse_set_config_with_model() {
     match cmd {
         ProtocolCommand::SetConfig { model, .. } => {
             assert_eq!(model.as_deref(), Some("claude-sonnet-4-5-20250514"));
+        }
+        other => panic!("expected SetConfig, got: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_set_config_with_image_input_capability() {
+    let json = r#"{"type":"set_config","model":"vision-model","image_input":"supported"}"#;
+    let cmd: ProtocolCommand = serde_json::from_str(json).unwrap();
+    match cmd {
+        ProtocolCommand::SetConfig { model, image_input, .. } => {
+            assert_eq!(model.as_deref(), Some("vision-model"));
+            assert_eq!(image_input, Some(ImageInputCapability::Supported));
         }
         other => panic!("expected SetConfig, got: {other:?}"),
     }

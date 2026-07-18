@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "aion-agent"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "aion-compact",
  "aion-config",
@@ -26,6 +26,7 @@ dependencies = [
  "aion-types",
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "crossterm",
  "dirs",
@@ -49,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "aion-cli"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "aion-agent",
  "aion-compact",
@@ -60,6 +61,7 @@ dependencies = [
  "aion-providers",
  "aion-skills",
  "aion-tools",
+ "aion-types",
  "anyhow",
  "clap",
  "tokio",
@@ -70,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "aion-compact"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "regex",
  "serde",
@@ -81,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "aion-config"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "aion-compact",
  "aion-process",
@@ -108,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "aion-mcp"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "aion-config",
  "aion-protocol",
@@ -128,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "aion-memory"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "aion-config",
  "chrono",
@@ -144,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "aion-process"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "libc",
  "tokio",
@@ -154,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "aion-protocol"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "aion-types",
  "rstest",
@@ -167,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "aion-providers"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "aion-config",
  "aion-types",
@@ -197,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "aion-skills"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "aion-config",
  "aion-mcp",
@@ -226,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "aion-tools"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "aion-config",
  "aion-process",
@@ -234,6 +236,7 @@ dependencies = [
  "aion-types",
  "anyhow",
  "async-trait",
+ "base64",
  "futures",
  "glob",
  "lru",
@@ -247,9 +250,10 @@ dependencies = [
 
 [[package]]
 name = "aion-types"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "serde",
  "serde_json",

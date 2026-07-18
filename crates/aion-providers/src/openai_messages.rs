@@ -77,23 +77,68 @@ pub(crate) fn build_messages(messages: &[Message], system: &str, compat: &Provid
                         }
                     }
                 } else {
-                    let text: String = msg
-                        .content
-                        .iter()
-                        .filter_map(|b| {
-                            if let ContentBlock::Text { text } = b {
-                                Some(text.as_str())
-                            } else {
-                                None
+                    // Check if message has image content blocks
+                    let has_images = msg.content.iter().any(|b| matches!(b, ContentBlock::Image { .. }));
+
+                    if has_images {
+                        // Build content as array of blocks for multimodal support
+                        let mut content_array: Vec<Value> = Vec::new();
+
+                        for block in &msg.content {
+                            match block {
+                                ContentBlock::Text { text } => {
+                                    let text = strip_patterns_from_text(text, compat);
+                                    if !text.is_empty() {
+                                        content_array.push(json!({
+                                            "type": "text",
+                                            "text": text
+                                        }));
+                                    }
+                                }
+                                ContentBlock::Image { image_url } => {
+                                    if let Err(error) = image_url.validate() {
+                                        tracing::warn!(
+                                            target: "aion_providers",
+                                            error = %error,
+                                            "skipping invalid image block in OpenAI projection"
+                                        );
+                                        continue;
+                                    }
+                                    content_array.push(json!({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": image_url.url
+                                        }
+                                    }));
+                                }
+                                _ => {} // Skip other block types for user messages
                             }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let text = strip_patterns_from_text(&text, compat);
-                    result.push(json!({
-                        "role": "user",
-                        "content": text
-                    }));
+                        }
+
+                        result.push(json!({
+                            "role": "user",
+                            "content": content_array
+                        }));
+                    } else {
+                        // Plain text content (backward compatible)
+                        let text: String = msg
+                            .content
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text { text } = b {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let text = strip_patterns_from_text(&text, compat);
+                        result.push(json!({
+                            "role": "user",
+                            "content": text
+                        }));
+                    }
                 }
             }
             Role::Assistant => {

@@ -12,6 +12,7 @@ mod tests {
             session_id: Some("abc123".to_string()),
             capabilities: Capabilities {
                 tool_approval: true,
+                image_input: ImageInputCapability::Supported,
                 thinking: true,
                 effort: false,
                 effort_levels: vec![],
@@ -32,6 +33,7 @@ mod tests {
             session_id: None,
             capabilities: Capabilities {
                 tool_approval: true,
+                image_input: ImageInputCapability::Unknown,
                 thinking: true,
                 effort: false,
                 effort_levels: vec![],
@@ -138,6 +140,7 @@ mod tests {
             session_id: Some("abc".to_string()),
             capabilities: Capabilities {
                 tool_approval: true,
+                image_input: ImageInputCapability::Supported,
                 thinking: true,
                 effort: true,
                 effort_levels: vec!["low".into(), "medium".into(), "high".into()],
@@ -148,6 +151,7 @@ mod tests {
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["capabilities"]["thinking"], true);
+        assert_eq!(json["capabilities"]["image_input"], "supported");
         assert_eq!(json["capabilities"]["effort"], true);
         assert_eq!(json["capabilities"]["effort_levels"][0], "low");
         assert_eq!(json["capabilities"]["modes"][2], "yolo");
@@ -180,6 +184,7 @@ mod tests {
         let event = ProtocolEvent::ConfigChanged {
             capabilities: Capabilities {
                 tool_approval: true,
+                image_input: ImageInputCapability::Unsupported,
                 thinking: false,
                 effort: true,
                 effort_levels: vec!["low".into(), "medium".into(), "high".into()],
@@ -192,5 +197,6 @@ mod tests {
         assert_eq!(json["type"], "config_changed");
         assert_eq!(json["capabilities"]["thinking"], false);
         assert_eq!(json["capabilities"]["effort"], true);
+        assert_eq!(json["capabilities"]["image_input"], "unsupported");
     }
 }

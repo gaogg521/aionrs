@@ -143,6 +143,24 @@ pub fn build_messages(messages: &[Message], compat: &ProviderCompat) -> Vec<Valu
                     }
                     content.push(value);
                 }
+                ContentBlock::Image { image_url } => {
+                    if let Err(e) = image_url.validate() {
+                        tracing::warn!(
+                            target: "aion_providers",
+                            error = %e,
+                            "skipping invalid image block in Anthropic projection"
+                        );
+                        continue;
+                    }
+                    content.push(json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": get_media_type_from_data_uri(&image_url.url),
+                            "data": get_base64_data_from_data_uri(&image_url.url)
+                        }
+                    }));
+                }
             }
         }
 
@@ -393,6 +411,24 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
     }
 
     events
+}
+
+/// Extract media type from a data URI (e.g., "data:image/png;base64,..." -> "image/png")
+fn get_media_type_from_data_uri(data_uri: &str) -> &str {
+    if let Some(rest) = data_uri.strip_prefix("data:")
+        && let Some(semi_pos) = rest.find(';')
+    {
+        return &rest[..semi_pos];
+    }
+    "application/octet-stream"
+}
+
+/// Extract base64 data from a data URI (e.g., "data:image/png;base64,abc123" -> "abc123")
+fn get_base64_data_from_data_uri(data_uri: &str) -> &str {
+    if let Some(comma_pos) = data_uri.find(',') {
+        return &data_uri[comma_pos + 1..];
+    }
+    data_uri
 }
 
 #[cfg(test)]
