@@ -66,9 +66,11 @@ mod tests {
             "required": ["tasks"]
         });
         let input = json!({});
-        let result = maybe_append_deferred_hint("Missing or invalid 'tasks' array", schema, &input);
+        let (result, promoted) = maybe_append_deferred_hint("Missing or invalid 'tasks' array", schema, &input);
         assert!(result.contains("Missing or invalid 'tasks' array"));
-        assert!(result.contains("ToolSearch"));
+        assert!(result.contains("full schema has NOW been loaded"));
+        assert!(result.contains("tasks"));
+        assert!(promoted);
     }
 
     #[test]
@@ -79,9 +81,9 @@ mod tests {
             "required": ["tasks"]
         });
         let input = json!({"tasks": [{"name": "t1", "prompt": "do x"}]});
-        let result = maybe_append_deferred_hint("Some runtime error", schema, &input);
+        let (result, promoted) = maybe_append_deferred_hint("Some runtime error", schema, &input);
         assert_eq!(result, "Some runtime error");
-        assert!(!result.contains("ToolSearch"));
+        assert!(!promoted);
     }
 
     #[test]
@@ -91,8 +93,9 @@ mod tests {
             "properties": {}
         });
         let input = json!({});
-        let result = maybe_append_deferred_hint("some error", schema, &input);
+        let (result, promoted) = maybe_append_deferred_hint("some error", schema, &input);
         assert_eq!(result, "some error");
+        assert!(!promoted);
     }
 
     #[test]
@@ -103,8 +106,9 @@ mod tests {
             "required": []
         });
         let input = json!({});
-        let result = maybe_append_deferred_hint("some error", schema, &input);
+        let (result, promoted) = maybe_append_deferred_hint("some error", schema, &input);
         assert_eq!(result, "some error");
+        assert!(!promoted);
     }
 
     #[test]
@@ -118,8 +122,9 @@ mod tests {
             "required": ["a", "b"]
         });
         let input = json!({"a": "present"});
-        let result = maybe_append_deferred_hint("validation failed", schema, &input);
-        assert!(result.contains("ToolSearch"));
+        let (result, promoted) = maybe_append_deferred_hint("validation failed", schema, &input);
+        assert!(result.contains("\"b\"") || result.contains(" b"));
+        assert!(promoted);
     }
 
     // -- execute_single integration tests (deferred tool hint) ----------------
@@ -230,7 +235,8 @@ mod tests {
         if let ContentBlock::ToolResult { content, is_error, .. } = &result {
             assert!(is_error);
             assert!(content.contains("Missing or invalid 'tasks' array"));
-            assert!(content.contains("ToolSearch"));
+            // Fork deferred-schema promote path (not upstream's "use ToolSearch" hint).
+            assert!(content.contains("full schema has NOW been loaded"));
         } else {
             panic!("expected ToolResult");
         }
