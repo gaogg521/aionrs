@@ -30,6 +30,10 @@ pub struct ProviderCompat {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TransportCompat {
+    /// OpenAI wire API used for request and response projection.
+    /// Default: chat_completions for backward compatibility.
+    pub openai_api_mode: Option<OpenAiApiMode>,
+
     /// Field name for max tokens in request body.
     /// Default: "max_tokens" for all providers.
     pub max_tokens_field: Option<String>,
@@ -185,6 +189,7 @@ pub struct ReasoningCompat {
 impl TransportCompat {
     fn merge(defaults: Self, user: Self) -> Self {
         Self {
+            openai_api_mode: user.openai_api_mode.or(defaults.openai_api_mode),
             max_tokens_field: user.max_tokens_field.or(defaults.max_tokens_field),
             default_max_tokens: user.default_max_tokens.or(defaults.default_max_tokens),
             model_max_tokens: user.model_max_tokens.or(defaults.model_max_tokens),
@@ -193,6 +198,14 @@ impl TransportCompat {
             include_stream_options: user.include_stream_options.or(defaults.include_stream_options),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiApiMode {
+    #[default]
+    ChatCompletions,
+    Responses,
 }
 
 impl MessageCompat {
@@ -310,6 +323,7 @@ impl ProviderCompat {
     pub fn openai_defaults() -> Self {
         Self {
             transport: TransportCompat {
+                openai_api_mode: Some(OpenAiApiMode::ChatCompletions),
                 max_tokens_field: Some("max_tokens".into()),
                 api_path: Some("/chat/completions".into()),
                 include_stream_options: Some(true),
@@ -358,6 +372,25 @@ impl ProviderCompat {
 
     pub fn max_tokens_field(&self) -> &str {
         self.transport.max_tokens_field.as_deref().unwrap_or("max_tokens")
+    }
+
+    pub fn openai_api_mode(&self) -> OpenAiApiMode {
+        self.transport.openai_api_mode.unwrap_or_default()
+    }
+
+    /// Resolve the OpenAI endpoint path for the selected wire API.
+    ///
+    /// The historical `/chat/completions` preset remains the default for Chat
+    /// Completions. When Responses is selected, that inherited preset is
+    /// replaced with `/responses`; non-default custom paths remain honored.
+    pub fn openai_api_path(&self) -> &str {
+        match self.openai_api_mode() {
+            OpenAiApiMode::ChatCompletions => self.api_path(),
+            OpenAiApiMode::Responses => match self.transport.api_path.as_deref() {
+                Some(path) if path != "/chat/completions" => path,
+                _ => "/responses",
+            },
+        }
     }
 
     pub fn image_input(&self) -> ImageInputCapability {
