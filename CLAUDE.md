@@ -4,13 +4,14 @@
 
 > **本仓 = fork，只单向同步上游 → fork，永不反向提 PR。** 三仓对上游的映射、版本对照、当前同步状态、同步套路与不变量见：[`../1oneUI/docs/guides/upstream-sync-reference.zh-CN.md`](../1oneUI/docs/guides/upstream-sync-reference.zh-CN.md)
 
-**master 上的 6 个 fork 专属补丁(上游没有,必保留)**:
+**master 上的 7 个 fork 专属补丁(上游没有,必保留)**:
 - `3f7b9b5` 流式 tool_call 参数占位空对象空参 bug 修复。
 - `81a1d06` thinking 阶梯基础设施(只在显式请求声明 thinking + 多级重试 level1/2)。
 - `ea45450` **文本化工具历史回放(命脉)** = 兜 litellm-internal 网关无状态拒绝一切 tool_calls 历史(level3);详见 1oneUI 的 [`session-2026-07-10-thinking-param-and-rename.zh-CN.md`](../1oneUI/docs/guides/session-2026-07-10-thinking-param-and-rename.zh-CN.md)。
 - `1ffc171` 测试修复(engine_test 补 `..Default::default()`)。
 - `8de0bf5` **deferred 工具 schema 命中即提升(命脉)** = 兜 GLM 等受约束解码渠道对 stub schema 只能生成 `{}` 空参的死循环(ToolSearch 命中/空参失败均提升为全量申报);详见 1oneUI 的 [`session-2026-07-13-deferred-schema-and-assistant-skills.zh-CN.md`](../1oneUI/docs/guides/session-2026-07-13-deferred-schema-and-assistant-skills.zh-CN.md)。
 - `92d9242` **GLM 盲搜纠偏(命脉,与 8de0bf5 同源)** = 系统提示 + ToolSearch 未命中消息把 GLM 从「把延迟工具引导过度泛化、盲搜核心工具/技能」拉回直接调用 Skill/直连工具;同上文档。
+- `9fa951e` **输出截断改为有界续写(2026-07-20)** = 撞 provider 输出上限时,原逻辑只补救一轮,真正长内容必然再撞上限直接放弃;改成最多 12 轮有界续写逐段拼接;截断落在流式 tool_call 中途时不再误判成正常工具轮;详见 1oneUI 的 [`session-2026-07-20-truncation-fix-and-upstream-resync.zh-CN.md`](../1oneUI/docs/guides/session-2026-07-20-truncation-fix-and-upstream-resync.zh-CN.md)。
 
 > **8de0bf5 + 92d9242 是机制级修复,无任何模型名硬判**(符合 No Hardcoded Provider Quirks):修的是延迟工具机制本身对受约束解码模型不友好的缺陷,对所有模型生效,GLM 只是第一个踩崩的。若将来提示级纠偏不够,后备是 `ProviderCompat.eager_tool_schemas`(按 provider 配置关 deferral,仍非按模型名),别退回到 `if model==...` 特判。
 
