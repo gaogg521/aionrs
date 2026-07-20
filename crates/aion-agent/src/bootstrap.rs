@@ -326,8 +326,7 @@ impl AgentBootstrap {
     fn register_tool_search(&self, registry: &mut ToolRegistry) {
         // Upstream: filter ToolSearch catalog by runtime tool policy.
         // Fork: keep with_loaded_schemas so deferred schema hits promote into the live registry.
-        let tool_defs_snapshot =
-            registry.to_tool_defs_filtered(|tool| self.tool_policy.allows(tool.name()));
+        let tool_defs_snapshot = registry.to_tool_defs_filtered(|tool| self.tool_policy.allows(tool.name()));
         registry.register(Box::new(ToolSearchTool::with_loaded_schemas(
             tool_defs_snapshot,
             registry.loaded_schemas_handle(),
