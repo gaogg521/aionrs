@@ -584,6 +584,101 @@ async fn max_tokens_continuation_does_not_increment_reported_turns() {
     assert_eq!(result.turns, 1);
 }
 
+// ---------------------------------------------------------------------------
+// Repeated truncation is the normal case for a genuinely long answer: the
+// continuation turn is capped by the same output limit that cut the first one.
+// The engine must keep resuming and stitch the chunks together instead of
+// giving up after a single retry.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn repeated_truncation_continues_until_the_answer_completes() {
+    let truncated = |text: &str| {
+        vec![
+            LlmEvent::TextDelta(text.to_string()),
+            LlmEvent::Done {
+                stop_reason: StopReason::MaxTokens,
+                usage: TokenUsage::default(),
+            },
+        ]
+    };
+
+    let provider = Arc::new(FullRecordingRequestProvider::new(vec![
+        truncated("chunk1 "),
+        truncated("chunk2 "),
+        truncated("chunk3 "),
+        truncated("chunk4 "),
+        vec![
+            LlmEvent::TextDelta("end".to_string()),
+            LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            },
+        ],
+    ]));
+    let requests = provider.requests();
+
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        ToolRegistry::new(),
+        silent_output(),
+        std::env::temp_dir(),
+    );
+    let result = engine
+        .run("Write a very long file", "")
+        .await
+        .expect("engine should succeed");
+
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(
+        result.text, "chunk1 chunk2 chunk3 chunk4 end",
+        "every recovered chunk must be stitched into the final text"
+    );
+    // Continuations are not tool-use iterations and must not consume the budget.
+    assert_eq!(result.turns, 1);
+    assert_eq!(requests.lock().unwrap().len(), 5);
+}
+
+// ---------------------------------------------------------------------------
+// The continuation budget is finite: a model that never stops being truncated
+// must terminate with the truncation notice rather than loop forever.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn endless_truncation_stops_at_the_continuation_budget() {
+    let responses = (0..64)
+        .map(|_| {
+            vec![
+                LlmEvent::TextDelta("x".to_string()),
+                LlmEvent::Done {
+                    stop_reason: StopReason::MaxTokens,
+                    usage: TokenUsage::default(),
+                },
+            ]
+        })
+        .collect();
+    let provider = Arc::new(FullRecordingRequestProvider::new(responses));
+    let requests = provider.requests();
+
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        ToolRegistry::new(),
+        silent_output(),
+        std::env::temp_dir(),
+    );
+    let result = engine.run("Write forever", "").await.expect("engine should fall back");
+
+    assert_eq!(result.stop_reason, StopReason::MaxTokens);
+    // First turn plus the bounded continuations, and nothing beyond.
+    let request_count = requests.lock().unwrap().len();
+    assert_eq!(request_count, 13);
+    assert_eq!(
+        result.text,
+        "x".repeat(request_count),
+        "text recovered before giving up must still be returned"
+    );
+}
+
 #[tokio::test]
 async fn max_tokens_finalization_tool_call_falls_back_without_persisting_tool_use() {
     let dir = tempdir().expect("tempdir should be created");

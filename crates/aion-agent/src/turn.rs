@@ -14,13 +14,21 @@ pub(crate) enum TurnOutcome {
 
 impl TurnOutcome {
     pub(crate) fn from_stream(outcome: StreamOutcome) -> Self {
+        // Truncation is checked before tool calls on purpose. When the output
+        // limit lands in the middle of a streamed tool call, the accumulated
+        // call carries partial arguments; treating it as a normal tool round
+        // hands that fragment to the malformed-call sanitizer and loses the
+        // truncation signal entirely.
+        if outcome.stop_reason == StopReason::MaxTokens {
+            return Self::Truncated(outcome);
+        }
+
         if !outcome.tool_calls.is_empty() {
             return Self::ToolRound(outcome);
         }
 
         match outcome.stop_reason {
             StopReason::EndTurn if !outcome.assistant_text.trim().is_empty() => Self::Final(outcome),
-            StopReason::MaxTokens => Self::Truncated(outcome),
             _ => Self::EmptyFinal(outcome),
         }
     }
@@ -39,8 +47,13 @@ impl FinalizationReason {
             FinalizationReason::TurnBudget => {
                 "Stopped after reaching the turn budget before the model produced a final answer."
             }
+            // Names the setting to change: when no per-model output limit is
+            // configured the field is omitted from the request entirely and
+            // the upstream gateway applies its own default, which is often far
+            // below what the model supports. That is invisible from the UI, so
+            // the message has to point at it.
             FinalizationReason::MaxTokens => {
-                "The response was cut off by the token limit and could not be completed automatically."
+                "The response kept hitting the output token limit and could not be completed automatically. If this model supports longer output, raise its max output tokens in the model settings — when it is unset the provider's own default applies, which is usually much lower."
             }
             FinalizationReason::EmptyFinal => "The model finished without visible answer text after one retry.",
         }
@@ -65,7 +78,7 @@ impl TurnKind {
                 Some("Do not call any more tools. Use the tool results already provided and give the final answer now.")
             }
             Self::Finalization(FinalizationReason::MaxTokens) => Some(
-                "The previous response was cut off by the token limit. Finish the answer now. Do not call any tools.",
+                "The previous response was cut off by the token limit. Continue from exactly where it stopped — do not repeat what you already wrote, do not restart, and do not add a preamble. If you were inside a code block, resume inside it. Do not call any tools.",
             ),
             Self::Finalization(FinalizationReason::EmptyFinal) => Some(
                 "The previous assistant response finished without visible answer text. Provide a concise visible answer now. Do not send reasoning only. Do not call any tools.",
@@ -118,6 +131,12 @@ pub(crate) struct TurnGuards {
     tool_call_malformed: ToolCallMalformedTracker,
     tool_call_failures: ToolCallFailureTracker,
 }
+
+/// Output-limit continuations allowed within one run before the engine gives
+/// up and emits the truncation fallback. Each continuation is a full model
+/// turn that replays the whole conversation, so this bounds the worst-case
+/// cost of a response that never converges.
+pub(crate) const MAX_TRUNCATION_CONTINUATIONS: usize = 12;
 
 pub(crate) enum TurnGuardAction {
     Continue,

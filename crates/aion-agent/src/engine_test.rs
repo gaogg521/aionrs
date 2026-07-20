@@ -1828,7 +1828,11 @@ mod tests_loop_helpers {
 
         assert_eq!(kind.diagnostic_phase(), "max_tokens_finalization");
         assert!(prompt.contains("previous response was cut off"));
-        assert!(prompt.contains("Finish the answer"));
+        // The continuation must resume rather than wrap up: telling a model to
+        // "finish now" makes it compress the remainder of a long answer.
+        assert!(prompt.contains("Continue from exactly where it stopped"));
+        assert!(prompt.contains("do not repeat"));
+        assert!(prompt.contains("Do not call any tools"));
     }
 
     #[test]

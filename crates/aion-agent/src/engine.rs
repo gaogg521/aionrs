@@ -24,7 +24,9 @@ use crate::tool_call::{
     tool_call_malformed_reason,
 };
 use crate::tool_policy::ToolPolicy;
-use crate::turn::{FinalizationReason, TurnGuardAction, TurnGuards, TurnKind, TurnOutcome};
+use crate::turn::{
+    FinalizationReason, MAX_TRUNCATION_CONTINUATIONS, TurnGuardAction, TurnGuards, TurnKind, TurnOutcome,
+};
 use aion_compact::CompactLevel;
 use aion_config::compact::CompactConfig;
 use aion_config::compat::ProviderCompat;
@@ -443,16 +445,7 @@ impl AgentEngine {
                     });
                 }
                 TurnOutcome::Truncated(outcome) => {
-                    let assistant_content = build_assistant_content(&outcome);
-                    self.messages.push(Message::now(Role::Assistant, assistant_content));
-                    return self
-                        .finalize_once(
-                            FinalizationReason::MaxTokens,
-                            outcome.assistant_text,
-                            guards.counted_turns(),
-                            StopReason::MaxTokens,
-                        )
-                        .await;
+                    return self.continue_truncated(outcome, guards.counted_turns()).await;
                 }
                 TurnOutcome::EmptyFinal(outcome) => {
                     warn!(
@@ -759,6 +752,110 @@ impl AgentEngine {
         .await
     }
 
+    /// Resume a response the provider cut off at the output token limit.
+    ///
+    /// A single continuation only suffices when the answer was barely over the
+    /// limit; anything genuinely long (a large file, a long code block) is cut
+    /// again on the very next turn. So this retries up to
+    /// [`MAX_TRUNCATION_CONTINUATIONS`] times, stitching each recovered chunk
+    /// onto the result, and only falls back to the truncation error once the
+    /// budget is spent.
+    ///
+    /// Continuation turns are deliberately *not* counted against the run's
+    /// turn budget: that budget exists to stop tool-use loops that fail to
+    /// converge, and a long answer is neither a loop nor a failure. Tools stay
+    /// disabled here (inherited from [`TurnKind::disable_tools`]) so a
+    /// continuation cannot start new work — a continuation that answers with a
+    /// tool call is treated as a failed continuation and falls back.
+    async fn continue_truncated(
+        &mut self,
+        first: StreamOutcome,
+        counted_turns: usize,
+    ) -> Result<AgentResult, AgentError> {
+        // A truncated turn may carry a half-streamed tool call whose arguments
+        // are an incomplete JSON fragment. It will never receive a tool result,
+        // so it is dropped instead of being recorded as an orphan `tool_use`.
+        let mut recovered = first.assistant_text.clone();
+        let content = build_truncated_assistant_content(&first);
+        if !content.is_empty() {
+            self.messages.push(Message::now(Role::Assistant, content));
+        }
+        if !first.tool_calls.is_empty() {
+            debug!(
+                target: "aion_agent",
+                dropped_tool_calls = first.tool_calls.len(),
+                "dropped tool calls truncated mid-stream by the output limit"
+            );
+        }
+
+        for attempt in 1..=MAX_TRUNCATION_CONTINUATIONS {
+            let outcome = self
+                .run_turn(TurnKind::Finalization(FinalizationReason::MaxTokens))
+                .await?;
+
+            // A continuation that reaches for a tool has stopped continuing.
+            if !outcome.tool_calls.is_empty() {
+                recovered.push_str(&outcome.assistant_text);
+                return self.finalize_fallback(
+                    FinalizationReason::MaxTokens,
+                    recovered,
+                    counted_turns,
+                    StopReason::MaxTokens,
+                );
+            }
+
+            recovered.push_str(&outcome.assistant_text);
+
+            if outcome.stop_reason == StopReason::MaxTokens {
+                debug!(
+                    target: "aion_agent",
+                    attempt,
+                    limit = MAX_TRUNCATION_CONTINUATIONS,
+                    recovered_bytes = recovered.len(),
+                    "continuation was cut off again; resuming"
+                );
+                let content = build_truncated_assistant_content(&outcome);
+                if !content.is_empty() {
+                    self.messages.push(Message::now(Role::Assistant, content));
+                }
+                continue;
+            }
+
+            if outcome.stop_reason == StopReason::EndTurn && !outcome.assistant_text.trim().is_empty() {
+                let content = build_assistant_content(&outcome);
+                self.messages.push(Message::now(Role::Assistant, content));
+                self.save_session();
+                return Ok(AgentResult {
+                    text: recovered,
+                    stop_reason: StopReason::EndTurn,
+                    usage: self.total_usage.clone(),
+                    turns: counted_turns,
+                });
+            }
+
+            // Empty or otherwise unusable continuation: stop rather than spin.
+            return self.finalize_fallback(
+                FinalizationReason::MaxTokens,
+                recovered,
+                counted_turns,
+                StopReason::MaxTokens,
+            );
+        }
+
+        warn!(
+            target: "aion_agent",
+            limit = MAX_TRUNCATION_CONTINUATIONS,
+            recovered_bytes = recovered.len(),
+            "output truncation continuation budget exhausted"
+        );
+        self.finalize_fallback(
+            FinalizationReason::MaxTokens,
+            recovered,
+            counted_turns,
+            StopReason::MaxTokens,
+        )
+    }
+
     async fn finalize_once(
         &mut self,
         reason: FinalizationReason,
@@ -793,12 +890,24 @@ impl AgentEngine {
             tool_call_count = outcome.tool_calls.len(),
             "provider finalization did not produce a valid final answer"
         );
+        self.finalize_fallback(reason, combined_text, counted_turns, fallback_stop_reason)
+    }
+
+    /// Emit the fallback notice for `reason`, persist whatever text was
+    /// recovered, and return it as the run's result.
+    fn finalize_fallback(
+        &mut self,
+        reason: FinalizationReason,
+        recovered_text: String,
+        counted_turns: usize,
+        fallback_stop_reason: StopReason,
+    ) -> Result<AgentResult, AgentError> {
         let fallback = reason.fallback_prompt();
         self.output.emit_error(fallback);
-        let fallback_text = if combined_text.trim().is_empty() {
+        let fallback_text = if recovered_text.trim().is_empty() {
             fallback.to_string()
         } else {
-            combined_text
+            recovered_text
         };
 
         self.messages.push(Message::now(
@@ -1394,6 +1503,28 @@ fn build_assistant_content(outcome: &StreamOutcome) -> Vec<ContentBlock> {
         });
     }
     content.extend(outcome.tool_calls.iter().cloned());
+    content
+}
+
+/// Assistant content for a turn the provider cut off at the output limit.
+///
+/// Same as [`build_assistant_content`] minus the tool calls: a call that was
+/// still streaming when the limit hit has truncated arguments and no result
+/// will ever be produced for it, so replaying it would leave an orphan
+/// `tool_use` in the history.
+fn build_truncated_assistant_content(outcome: &StreamOutcome) -> Vec<ContentBlock> {
+    let mut content: Vec<ContentBlock> = Vec::new();
+    if !outcome.thinking_text.is_empty() || outcome.thinking_signature.is_some() {
+        content.push(ContentBlock::Thinking {
+            thinking: outcome.thinking_text.clone(),
+            signature: outcome.thinking_signature.clone(),
+        });
+    }
+    if !outcome.assistant_text.is_empty() {
+        content.push(ContentBlock::Text {
+            text: outcome.assistant_text.clone(),
+        });
+    }
     content
 }
 
