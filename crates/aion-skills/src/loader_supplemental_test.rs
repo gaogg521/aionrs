@@ -1,5 +1,6 @@
 use super::*;
 use crate::types::{FrontmatterData, LoadedFrom, SkillSource};
+use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
 
@@ -272,7 +273,12 @@ fn tc_10_4_deduplicate_mixed_unique_and_duplicate() {
 // TC-11.x: load_all_skills supplemental cases
 // -----------------------------------------------------------------------
 
+// Shares the default `serial_test` key with bundled_supplemental_test.rs's
+// registry-mutating tests: this asserts an exact result.len() that assumes
+// no bundled skills are registered, so it must not run concurrently with a
+// test that temporarily registers one via the process-global bundled registry.
 #[tokio::test]
+#[serial]
 async fn tc_11_1_bare_mode_only_loads_add_dirs() {
     let user_tmp = TempDir::new().unwrap();
     let add_tmp = TempDir::new().unwrap();

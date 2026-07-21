@@ -83,6 +83,10 @@ fn tc_10_04_init_registers_hello() {
     let skills = get_bundled_skills();
     assert!(!skills.is_empty());
     assert!(skills.iter().any(|s| s.name == "hello"));
+    // Leaving "hello" registered would leak into every other test in this
+    // process that assumes an empty registry (e.g. bare-mode load_all_skills
+    // tests elsewhere in the crate).
+    clear_bundled_skills();
 }
 
 // ---------------------------------------------------------------------------
@@ -449,4 +453,8 @@ fn tc_10_28_init_idempotent() {
         hello_count, 1,
         "init_bundled_skills must be idempotent — hello should appear exactly once"
     );
+    // Leaving "hello" registered would leak into every other test in this
+    // process that assumes an empty registry (e.g. bare-mode load_all_skills
+    // tests elsewhere in the crate).
+    clear_bundled_skills();
 }

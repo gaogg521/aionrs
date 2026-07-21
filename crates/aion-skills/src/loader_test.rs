@@ -1,4 +1,5 @@
 use super::*;
+use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
 
@@ -215,7 +216,12 @@ async fn test_load_commands_nested_flat() {
 
 // --- load_all_skills ---
 
+// Shares the default `serial_test` key with bundled_supplemental_test.rs's
+// registry-mutating tests: this asserts an exact result.len() that assumes
+// no bundled skills are registered, so it must not run concurrently with a
+// test that temporarily registers one via the process-global bundled registry.
 #[tokio::test]
+#[serial]
 async fn test_load_all_skills_bare_mode() {
     let tmp = TempDir::new().unwrap();
     // Create .aionrs/skills/ under the add_dir
