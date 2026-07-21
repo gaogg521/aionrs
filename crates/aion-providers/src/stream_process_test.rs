@@ -142,7 +142,12 @@ mod tests {
         let events = collect_events(rx).await;
         let summary = provider_stream_summary(&writer);
 
-        assert!(matches!(outcome, StreamOutcome::Ok));
+        // finish_reason arrived (so a Done event was staged in pending_done) but the
+        // connection ended before the terminal [DONE] frame — parser.finish() never
+        // flushes pending_done, so without this check the turn would silently report
+        // success. Content was already emitted, so this must surface as FailedPartial
+        // (not FailedEmpty/silent Ok) to match process_openai_responses_sse_stream.
+        assert!(matches!(outcome, StreamOutcome::FailedPartial(_)));
         assert_eq!(events.len(), 1);
         assert_eq!(summary["level"], "WARN");
         assert_eq!(summary["fields"]["termination"], "eof");
@@ -151,6 +156,23 @@ mod tests {
         assert_eq!(summary["fields"]["empty_answer"], false);
         assert_eq!(summary["fields"]["malformed_json"], false);
         assert_eq!(summary["fields"]["unexpected_finish_reason"], false);
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_eof_without_any_content_fails_empty() {
+        let body = Vec::new();
+        let response = mock_response(body).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_openai_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        // No content and no [DONE] at all (e.g. the gateway drops the connection
+        // before anything streams back) must fail empty so stream_runner's retry
+        // path can resend, rather than reporting the turn as cleanly finished.
+        assert!(matches!(outcome, StreamOutcome::FailedEmpty(_)));
+        assert!(events.is_empty());
     }
 
     #[tokio::test]

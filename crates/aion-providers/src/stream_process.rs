@@ -152,7 +152,18 @@ pub(crate) async fn process_openai_sse_stream(
     }
 
     state.emit_diagnostics(StreamTermination::Eof, started_at.elapsed());
-    StreamOutcome::Ok
+    // The connection closed (or the upstream gateway dropped it) before a
+    // terminal [DONE] frame arrived. Any finish_reason observed on the way in
+    // is stuck in state.pending_done and never gets flushed (parser.finish()
+    // is a no-op for this parser) — surfacing that as an error here, instead
+    // of returning Ok, keeps this in line with process_openai_responses_sse_stream
+    // and stops the agent from silently reporting the turn as finished.
+    let error = ProviderError::Connection("OpenAI stream ended without a terminal [DONE] event".to_string());
+    if emitted_content {
+        StreamOutcome::FailedPartial(error)
+    } else {
+        StreamOutcome::FailedEmpty(error)
+    }
 }
 
 pub(crate) async fn process_anthropic_sse_stream(
