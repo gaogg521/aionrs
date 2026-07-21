@@ -4,7 +4,7 @@
 
 > **本仓 = fork，只单向同步上游 → fork，永不反向提 PR。** 三仓对上游的映射、版本对照、当前同步状态、同步套路与不变量见：[`../1oneUI/docs/guides/upstream-sync-reference.zh-CN.md`](../1oneUI/docs/guides/upstream-sync-reference.zh-CN.md)
 
-**master 上的 9 个 fork 专属补丁(上游没有,必保留)**:
+**master 上的 10 个 fork 专属补丁(上游没有,必保留)**:
 - `3f7b9b5` 流式 tool_call 参数占位空对象空参 bug 修复。
 - `81a1d06` thinking 阶梯基础设施(只在显式请求声明 thinking + 多级重试 level1/2)。
 - `ea45450` **文本化工具历史回放(命脉)** = 兜 litellm-internal 网关无状态拒绝一切 tool_calls 历史(level3);详见 1oneUI 的 [`session-2026-07-10-thinking-param-and-rename.zh-CN.md`](../1oneUI/docs/guides/session-2026-07-10-thinking-param-and-rename.zh-CN.md)。
@@ -14,6 +14,7 @@
 - `9fa951e` **输出截断改为有界续写(2026-07-20)** = 撞 provider 输出上限时,原逻辑只补救一轮,真正长内容必然再撞上限直接放弃;改成最多 12 轮有界续写逐段拼接;截断落在流式 tool_call 中途时不再误判成正常工具轮;详见 1oneUI 的 [`session-2026-07-20-truncation-fix-and-upstream-resync.zh-CN.md`](../1oneUI/docs/guides/session-2026-07-20-truncation-fix-and-upstream-resync.zh-CN.md)。
 - `33c2bd2` **工具调用被截断后可恢复,不再静默丢弃(2026-07-21)** = 承接 `9fa951e` 留下的遗留项:①`openai_defaults()` 补 `default_max_tokens: Some(32_000)`,此前 OpenAI 兼容协议这条路径从不设默认值,请求里整个省略 `max_tokens` 字段,网关自己的默认上限(实测 4096)接管;②`aion-providers::openai.rs` 的 `finish_reason=="length"` 分支此前放任半截工具调用被丢弃,现在 drain 出来发新事件 `LlmEvent::ToolCallTruncated`,一路传到 `aion-agent::engine.rs::run_inner`——检测到工具调用被截断时不再走 `continue_truncated`(禁用工具续写纯文本导致"看着写完了实际没写"),而是可见提示+保留工具重试;⚠️**验证中额外发现一个未修的新坑**:kimi-k3 等慢速重推理模型的超长单次请求现在有机会拖到 10 分钟量级,撞上网关自己的连接超时(EOF 断连,不是干净的 `finish_reason:length`),同样静默失败且无任何可见报错——本轮判定为独立问题,留到下一轮;详见 [`session-2026-07-21-truncated-tool-call-recovery.zh-CN.md`](../1oneUI/docs/guides/session-2026-07-21-truncated-tool-call-recovery.zh-CN.md)。
 - `45cce3a` **OpenAI SSE 流 EOF 未见 DONE 时不再静默报成功(2026-07-21)** = 承接上一条留下的坑:`stream_process.rs::process_openai_sse_stream` 此前无论有没有见到 `[DONE]` 终止帧,循环自然结束就一律返回 `StreamOutcome::Ok`;`finish_reason` 到达时暂存进 `state.pending_done`,但 `OpenAiParser::finish()` 是空实现从不 flush 它,于是网关中途断连(EOF,不走 `[DONE]`)时这条 Done 事件连同 `finish_reason` 直接被吞掉,agent 侧收不到任何事件、以 `status:finished` 静默收场。改法是照抄同文件里姊妹函数 `process_openai_responses_sse_stream` 已有的正确写法:EOF 未见终止帧时按 `emitted_content` 返回 `FailedPartial`(已出内容→`stream_runner` 转成可见 `LlmEvent::Error`)或 `FailedEmpty`(全空→走既有重试退避逻辑自动重发)。**特意没加** `reqwest::Client` 层的连接/读超时(transport.rs 两处 `reqwest::Client::new()` 确认无超时)——这条路径要支持合法的 10+ 分钟长生成,笼统的总请求超时会把真实长流提前腰斩,风险大于收益;现有修复已经覆盖用户可感知的症状(可见报错 / 空流重试),留给未来如果需要更细粒度的 idle 超时再单独评估。
+- `34f827b` **Anthropic 原生协议 SSE 流同款 EOF 修复(2026-07-21)** = `33c2bd2` 当时明确留下的"范围外"缺口,本轮补上:`process_anthropic_sse_stream`(`AnthropicSseBlock` 解码器,同时覆盖 Anthropic 直连和 Vertex 两条 transport)同样无论有没有见到终止事件 `message_stop`,循环自然结束就一律返回 `Ok`;改法与 `45cce3a` 同源,新增 `message_stop_seen` 标志位,未见到时按 `emitted_content` 返回 `FailedPartial`/`FailedEmpty`。**注意这不是同一个坑的完整闭环**:Anthropic 协议在 `content_block_stop` 处理里,截断的 `tool_use` 半截 JSON 解析失败时会直接坍缩成 `{}` 当正常 `ToolUse` 事件发出(`anthropic_shared.rs` `content_block_stop` 分支),不是像 OpenAI 那样直接丢弃——所以截断的工具调用本身已经会在下游工具参数校验时暴露成可见错误,不是完全静默;`33c2bd2` 那种"专门识别截断+保留工具重试"的机制在这条协议路径上还没做,这次只补了"连接中途断连、没走到 message_stop"这一半。
 
 > **8de0bf5 + 92d9242 是机制级修复,无任何模型名硬判**(符合 No Hardcoded Provider Quirks):修的是延迟工具机制本身对受约束解码模型不友好的缺陷,对所有模型生效,GLM 只是第一个踩崩的。若将来提示级纠偏不够,后备是 `ProviderCompat.eager_tool_schemas`(按 provider 配置关 deferral,仍非按模型名),别退回到 `if model==...` 特判。
 
