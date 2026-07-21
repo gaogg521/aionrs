@@ -47,13 +47,15 @@ impl FinalizationReason {
             FinalizationReason::TurnBudget => {
                 "Stopped after reaching the turn budget before the model produced a final answer."
             }
-            // Names the setting to change: when no per-model output limit is
-            // configured the field is omitted from the request entirely and
-            // the upstream gateway applies its own default, which is often far
-            // below what the model supports. That is invisible from the UI, so
-            // the message has to point at it.
+            // Deliberately does not name a specific setting to change: this
+            // message is shared across every host (standalone CLI and
+            // embedded runtimes like 1oneUI), and whether a per-model output
+            // limit is even user-configurable — and where — varies by host.
+            // Pointing at a fixed location risks going stale the moment a
+            // host removes or relocates that control (as happened once
+            // already), so this stays host-agnostic and factual instead.
             FinalizationReason::MaxTokens => {
-                "The response kept hitting the output token limit and could not be completed automatically. If this model supports longer output, raise its max output tokens in the model settings — when it is unset the provider's own default applies, which is usually much lower."
+                "The response kept hitting the output token limit and could not be completed automatically. No per-model output limit was configured for this request, so the provider's own default applied — which is often much lower than the model actually supports."
             }
             FinalizationReason::EmptyFinal => "The model finished without visible answer text after one retry.",
         }
