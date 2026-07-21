@@ -376,3 +376,194 @@ async fn truncated_write_tool_call_recovers_via_retry_with_tools_enabled() {
         "the retry turn must keep tools enabled, unlike the plain-text truncation continuation"
     );
 }
+
+// ---------------------------------------------------------------------------
+// anthropic_truncated_write_tool_call_recovers_via_retry_with_tools_enabled
+//
+// Same scenario as the OpenAI test above, but over the Anthropic native wire
+// protocol (/v1/messages, event-framed SSE). Anthropic differs from OpenAI:
+// instead of dropping the half-streamed tool call, its content_block_stop used
+// to collapse the incomplete input JSON into `{}` and emit a normal ToolUse —
+// so the Write would run with empty arguments instead of being retried. This
+// proves the collapse is now surfaced as a truncated call and recovered.
+// ---------------------------------------------------------------------------
+
+fn anthropic_frame(event: &str, value: serde_json::Value) -> String {
+    format!("event: {event}\ndata: {value}\n\n")
+}
+
+fn stub_config_anthropic(base_url: String) -> Config {
+    Config {
+        provider: ProviderType::Anthropic,
+        provider_label: "anthropic-stub".to_string(),
+        model: "claude-stub".to_string(),
+        compat: ProviderCompat::anthropic_defaults(),
+        ..stub_config(base_url)
+    }
+}
+
+struct AnthropicTruncatedToolCallEndpoint {
+    calls: AtomicUsize,
+    file_path: String,
+    file_existed_before_retry: Arc<Mutex<Option<bool>>>,
+}
+
+impl Respond for AnthropicTruncatedToolCallEndpoint {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut body = String::new();
+
+        match call {
+            0 => {
+                // A Write tool_use block whose input_json_delta is cut off
+                // mid-string, then closed by content_block_stop and terminated
+                // with stop_reason: max_tokens — exactly what a real gateway
+                // sends when the output limit lands inside the arguments.
+                let escaped_path = self.file_path.replace('\\', "\\\\");
+                let partial = format!("{{\"file_path\":\"{escaped_path}\",\"content\":\"first line\\nstill writing");
+                body.push_str(&anthropic_frame(
+                    "message_start",
+                    json!({"type":"message_start","message":{"usage":{"input_tokens":100}}}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "content_block_start",
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_trunc","name":"Write"}}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "content_block_delta",
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":partial}}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "content_block_stop",
+                    json!({"type":"content_block_stop","index":0}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "message_delta",
+                    json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":4096}}),
+                ));
+                body.push_str(&anthropic_frame("message_stop", json!({"type":"message_stop"})));
+            }
+            1 => {
+                *self.file_existed_before_retry.lock().unwrap() = Some(std::path::Path::new(&self.file_path).exists());
+
+                let full_input = json!({
+                    "file_path": self.file_path,
+                    "content": "first line\nsecond line\nthird line\n"
+                });
+                body.push_str(&anthropic_frame(
+                    "message_start",
+                    json!({"type":"message_start","message":{"usage":{"input_tokens":120}}}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "content_block_start",
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_complete","name":"Write"}}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "content_block_delta",
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":full_input.to_string()}}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "content_block_stop",
+                    json!({"type":"content_block_stop","index":0}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "message_delta",
+                    json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":64}}),
+                ));
+                body.push_str(&anthropic_frame("message_stop", json!({"type":"message_stop"})));
+            }
+            _ => {
+                body.push_str(&anthropic_frame(
+                    "message_start",
+                    json!({"type":"message_start","message":{"usage":{"input_tokens":50}}}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "content_block_start",
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "content_block_delta",
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Done."}}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "content_block_stop",
+                    json!({"type":"content_block_stop","index":0}),
+                ));
+                body.push_str(&anthropic_frame(
+                    "message_delta",
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}),
+                ));
+                body.push_str(&anthropic_frame("message_stop", json!({"type":"message_stop"})));
+            }
+        }
+
+        ResponseTemplate::new(200)
+            .set_body_raw(body, "text/event-stream")
+            .append_header("content-type", "text/event-stream")
+    }
+}
+
+#[tokio::test]
+async fn anthropic_truncated_write_tool_call_recovers_via_retry_with_tools_enabled() {
+    let dir = tempdir().expect("tempdir");
+    let file_path = dir.path().join("task_manager.py");
+    let file_path_str = file_path.to_string_lossy().into_owned();
+    let file_existed_before_retry = Arc::new(Mutex::new(None));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(AnthropicTruncatedToolCallEndpoint {
+            calls: AtomicUsize::new(0),
+            file_path: file_path_str,
+            file_existed_before_retry: Arc::clone(&file_existed_before_retry),
+        })
+        .mount(&server)
+        .await;
+
+    let config = stub_config_anthropic(server.uri());
+    let provider = create_provider(&config);
+    let output = Arc::new(InfoRecordingSink::default());
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(WriteTool::new(None)));
+
+    let mut engine =
+        AgentEngine::new_with_provider(provider, config, registry, output.clone(), dir.path().to_path_buf());
+    let result = engine
+        .run("Write a small Python file.", "")
+        .await
+        .expect("engine should recover from the truncated Anthropic tool call");
+
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+
+    assert_eq!(
+        *file_existed_before_retry.lock().unwrap(),
+        Some(false),
+        "the truncated call must never have written anything (not even empty `{{}}` args)"
+    );
+
+    let written = std::fs::read_to_string(&file_path).expect("file should exist after the retry succeeds");
+    assert_eq!(written, "first line\nsecond line\nthird line\n");
+
+    {
+        let info_messages = output.info_messages.lock().unwrap();
+        assert!(
+            info_messages
+                .iter()
+                .any(|m| m.contains("Write") && m.contains("cut off")),
+            "a visible truncation notice naming the tool must be emitted, got: {info_messages:?}"
+        );
+    }
+
+    let requests = server.received_requests().await.expect("requests recorded");
+    assert_eq!(requests.len(), 3, "truncated turn + retry turn + post-tool-result turn");
+
+    let retry_body: serde_json::Value = requests[1]
+        .body_json()
+        .expect("retry request body should be valid JSON");
+    assert!(
+        retry_body.get("tools").is_some(),
+        "the retry turn must keep tools enabled"
+    );
+}

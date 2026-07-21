@@ -885,6 +885,95 @@ mod tests {
     }
 
     #[test]
+    fn test_truncated_tool_use_json_emits_tool_call_truncated() {
+        // A tool_use block whose input_json_delta fragments were cut off mid-JSON
+        // must surface as ToolCallTruncated, not a ToolUse with collapsed `{}`
+        // arguments (which would run the tool with wrong input).
+        let mut state = StreamState::new();
+        parse_sse_data(
+            "content_block_start",
+            r#"{"content_block":{"type":"tool_use","id":"call_trunc","name":"write"}}"#,
+            &mut state,
+        );
+        // Partial JSON: opening brace + key, cut off before the value/closing brace.
+        parse_sse_data(
+            "content_block_delta",
+            r#"{"delta":{"type":"input_json_delta","partial_json":"{\"content\":\"line1\\nline2"}}"#,
+            &mut state,
+        );
+        let events = parse_sse_data("content_block_stop", r#"{}"#, &mut state);
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            LlmEvent::ToolCallTruncated { id, name } => {
+                assert_eq!(id, "call_trunc");
+                assert_eq!(name, "write");
+            }
+            other => panic!("expected ToolCallTruncated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_empty_args_tool_use_still_emits_normal_tool_call() {
+        // A tool call with no arguments (no input_json_delta at all) is a
+        // legitimate empty-args call, not truncation — it must stay a ToolUse.
+        let mut state = StreamState::new();
+        parse_sse_data(
+            "content_block_start",
+            r#"{"content_block":{"type":"tool_use","id":"call_empty","name":"list_dir"}}"#,
+            &mut state,
+        );
+        let events = parse_sse_data("content_block_stop", r#"{}"#, &mut state);
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            LlmEvent::ToolUse { id, name, input, .. } => {
+                assert_eq!(id, "call_empty");
+                assert_eq!(name, "list_dir");
+                assert_eq!(*input, serde_json::json!({}));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_max_tokens_with_open_tool_block_emits_truncated_before_done() {
+        // Defensive path: the stream hits max_tokens while a tool_use block is
+        // still open and content_block_stop never arrived. message_delta must
+        // emit ToolCallTruncated (before Done) rather than dropping the call.
+        let mut state = StreamState::new();
+        parse_sse_data(
+            "content_block_start",
+            r#"{"content_block":{"type":"tool_use","id":"call_open","name":"edit"}}"#,
+            &mut state,
+        );
+        parse_sse_data(
+            "content_block_delta",
+            r#"{"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a.txt"}}"#,
+            &mut state,
+        );
+        // No content_block_stop — jump straight to the terminating message_delta.
+        let events = parse_sse_data(
+            "message_delta",
+            r#"{"delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":7}}"#,
+            &mut state,
+        );
+
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            LlmEvent::ToolCallTruncated { id, name } => {
+                assert_eq!(id, "call_open");
+                assert_eq!(name, "edit");
+            }
+            other => panic!("expected ToolCallTruncated first, got {other:?}"),
+        }
+        match &events[1] {
+            LlmEvent::Done { stop_reason, .. } => assert_eq!(*stop_reason, StopReason::MaxTokens),
+            other => panic!("expected Done second, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_parse_anthropic_event_stop() {
         // arrange
         let mut state = StreamState::new();

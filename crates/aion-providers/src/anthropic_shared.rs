@@ -355,21 +355,51 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
 
         "content_block_stop" => {
             if state.current_block_type.as_deref() == Some("tool_use") {
-                let input: Value =
-                    serde_json::from_str(&state.tool_input_json).unwrap_or(Value::Object(serde_json::Map::new()));
-                if state.tool_name.is_empty() {
-                    tracing::warn!(
-                        target: "aion_providers",
-                        tool_call_id = %state.tool_id,
-                        "provider emitted tool_call with empty function name; recorded to history as-is"
-                    );
+                let raw = state.tool_input_json.trim();
+                // A complete tool_use block's streamed input_json_delta fragments
+                // always concatenate into a valid JSON object. An empty
+                // accumulation is a legitimate no-argument call. A *non-empty*
+                // accumulation that fails to parse can only mean the response was
+                // cut off mid-block by the output token limit. Previously that
+                // case was silently collapsed to `{}`, so the tool then ran with
+                // empty/wrong arguments; instead surface it as a truncated call
+                // (mirrors the OpenAI path in openai.rs) so the engine retries it
+                // with tools still enabled rather than executing a broken call.
+                let parsed = if raw.is_empty() {
+                    Some(Value::Object(serde_json::Map::new()))
+                } else {
+                    serde_json::from_str::<Value>(raw).ok()
+                };
+                match parsed {
+                    Some(input) => {
+                        if state.tool_name.is_empty() {
+                            tracing::warn!(
+                                target: "aion_providers",
+                                tool_call_id = %state.tool_id,
+                                "provider emitted tool_call with empty function name; recorded to history as-is"
+                            );
+                        }
+                        events.push(LlmEvent::ToolUse {
+                            id: state.tool_id.clone(),
+                            name: state.tool_name.clone(),
+                            input,
+                            extra: None,
+                        });
+                    }
+                    None => {
+                        tracing::warn!(
+                            target: "aion_providers",
+                            tool_call_id = %state.tool_id,
+                            tool = %state.tool_name,
+                            "tool_use input JSON was truncated mid-stream by the output limit; \
+                             emitting ToolCallTruncated instead of a call with empty arguments"
+                        );
+                        events.push(LlmEvent::ToolCallTruncated {
+                            id: state.tool_id.clone(),
+                            name: state.tool_name.clone(),
+                        });
+                    }
                 }
-                events.push(LlmEvent::ToolUse {
-                    id: state.tool_id.clone(),
-                    name: state.tool_name.clone(),
-                    input,
-                    extra: None,
-                });
                 state.tool_input_json.clear();
             }
             state.current_block_type = None;
@@ -383,6 +413,29 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
                 Some("max_tokens") => StopReason::MaxTokens,
                 _ => StopReason::EndTurn,
             };
+
+            // Defensive: if the output limit cut the stream off while a tool_use
+            // block was still open and no content_block_stop arrived to close it
+            // (current_block_type is still tool_use), the accumulated call would
+            // otherwise be dropped entirely. Surface it as a truncated call
+            // before the Done event, mirroring the content_block_stop path above.
+            // If content_block_stop already handled it, current_block_type is
+            // None here and this does not fire (no double emit).
+            if stop_reason == StopReason::MaxTokens && state.current_block_type.as_deref() == Some("tool_use") {
+                tracing::warn!(
+                    target: "aion_providers",
+                    tool_call_id = %state.tool_id,
+                    tool = %state.tool_name,
+                    "stream hit the output limit with a tool_use block still open and no content_block_stop; \
+                     emitting ToolCallTruncated"
+                );
+                events.push(LlmEvent::ToolCallTruncated {
+                    id: state.tool_id.clone(),
+                    name: state.tool_name.clone(),
+                });
+                state.tool_input_json.clear();
+                state.current_block_type = None;
+            }
 
             if let Some(usage) = json.get("usage") {
                 state.output_tokens = usage["output_tokens"].as_u64().unwrap_or(0);
