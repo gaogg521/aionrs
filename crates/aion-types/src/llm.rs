@@ -42,6 +42,12 @@ pub enum LlmEvent {
     ThinkingSignature(String),
     /// Opaque provider output item that must be persisted and replayed.
     ProviderItem { provider: String, item: Value },
+    /// A tool call whose arguments were still streaming when the provider
+    /// cut the response off at the output limit. This is not a real
+    /// `ToolUse` — the call never completed and must not be executed; it
+    /// exists so the agent layer can surface the truncation to the user and
+    /// retry with tools still enabled instead of silently dropping it.
+    ToolCallTruncated { id: ToolUseId, name: String },
     /// Response complete
     Done { stop_reason: StopReason, usage: TokenUsage },
     /// Error from the API

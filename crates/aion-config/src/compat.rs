@@ -327,6 +327,16 @@ impl ProviderCompat {
                 max_tokens_field: Some("max_tokens".into()),
                 api_path: Some("/chat/completions".into()),
                 include_stream_options: Some(true),
+                // Without an explicit value the field is omitted from the
+                // request entirely and the upstream gateway falls back to its
+                // own default, which is often far lower than what the model
+                // actually supports (observed: 4096 completion tokens on a
+                // LiteLLM-fronted gateway) — long tool-call output (e.g. a
+                // large `Write` call) gets cut off mid-argument well before
+                // the model was done. A generous provider-family default
+                // avoids that for the common case without hardcoding a
+                // specific gateway or model.
+                default_max_tokens: Some(32_000),
                 ..Default::default()
             },
             messages: MessageCompat {

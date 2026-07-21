@@ -201,7 +201,7 @@ max_tokens = 64000
             merged.transport.max_tokens_field.as_deref(),
             Some("max_completion_tokens")
         );
-        assert!(merged.default_max_tokens_for_model("claude-sonnet-4-6").is_none());
+        assert_eq!(merged.default_max_tokens_for_model("claude-sonnet-4-6"), Some(32_000));
         assert_eq!(merged.transport.api_path.as_deref(), Some("/chat/completions"));
         assert_eq!(merged.max_request_body_bytes(), Some(2_048));
         assert!(merged.include_stream_options());
@@ -280,7 +280,10 @@ max_tokens = 64000
         assert_eq!(compat.tools.emit_tools, Some(true));
         assert!(compat.include_stream_options());
         assert!(compat.emit_tools());
-        assert_eq!(compat.default_max_tokens_for_model("gpt-5"), None);
+        // Generous provider-family default so a request with no per-model
+        // override still avoids the gateway's own (often much lower) default
+        // output-length cap. See `openai_defaults()`'s comment for context.
+        assert_eq!(compat.default_max_tokens_for_model("gpt-5"), Some(32_000));
     }
 
     #[test]

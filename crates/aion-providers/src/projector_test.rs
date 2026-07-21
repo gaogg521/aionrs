@@ -391,15 +391,34 @@ mod tests {
     }
 
     #[test]
-    fn test_openai_projector_omits_max_tokens_when_unset() {
+    fn test_openai_projector_omits_max_tokens_when_truly_unset() {
+        // A compat with no `default_max_tokens` at all (unlike
+        // `openai_defaults()`, which now sets a generous fallback — see the
+        // next test) still omits the field rather than sending a bogus value.
+        let mut request = test_request(vec![], None);
+        request.max_tokens = None;
+
+        let body = OpenAiProjector::project(&request, &ProviderCompat::default())
+            .expect("request body projection should succeed");
+
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn test_openai_projector_uses_openai_defaults_fallback_when_unset() {
+        // Regression guard: without an explicit request-level or per-model
+        // override, `openai_defaults()` must still send a generous
+        // `max_tokens` rather than omitting it — omitting it lets the
+        // upstream gateway apply its own (often much lower) default and
+        // silently truncate long output. See `openai_defaults()`'s comment.
         let mut request = test_request(vec![], None);
         request.max_tokens = None;
 
         let body = OpenAiProjector::project(&request, &ProviderCompat::openai_defaults())
             .expect("request body projection should succeed");
 
-        assert!(body.get("max_tokens").is_none());
-        assert!(body.get("max_completion_tokens").is_none());
+        assert_eq!(body["max_tokens"], 32_000);
     }
 
     #[test]

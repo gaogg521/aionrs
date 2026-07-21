@@ -260,7 +260,10 @@ impl OpenAiStreamDiagnostics {
             LlmEvent::Done { .. } => {
                 self.parsed_done_event_count = self.parsed_done_event_count.saturating_add(1);
             }
-            LlmEvent::ThinkingSignature(_) | LlmEvent::ProviderItem { .. } | LlmEvent::Error(_) => {}
+            LlmEvent::ThinkingSignature(_)
+            | LlmEvent::ProviderItem { .. }
+            | LlmEvent::Error(_)
+            | LlmEvent::ToolCallTruncated { .. } => {}
         }
     }
 

@@ -72,4 +72,20 @@ mod tests {
             _ => panic!("expected ThinkingSignature"),
         }
     }
+
+    #[test]
+    fn test_llm_event_tool_call_truncated_fields() {
+        let event = LlmEvent::ToolCallTruncated {
+            id: "call_1".to_string(),
+            name: "Write".to_string(),
+        };
+
+        match event {
+            LlmEvent::ToolCallTruncated { id, name } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "Write");
+            }
+            _ => panic!("expected ToolCallTruncated"),
+        }
+    }
 }

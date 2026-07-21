@@ -1852,6 +1852,7 @@ mod tests_loop_helpers {
             thinking_signature: None,
             provider_items: Vec::new(),
             tool_calls,
+            truncated_tool_calls: Vec::new(),
             stop_reason,
             usage: TokenUsage::default(),
         }
@@ -1895,6 +1896,24 @@ mod tests_loop_helpers {
         let outcome = stream_outcome("I will now write the file", StopReason::MaxTokens, Vec::new());
 
         assert!(matches!(TurnOutcome::from_stream(outcome), TurnOutcome::Truncated(_)));
+    }
+
+    #[test]
+    fn turn_outcome_truncated_preserves_truncated_tool_calls() {
+        let mut outcome = stream_outcome("I will now write the file", StopReason::MaxTokens, Vec::new());
+        outcome
+            .truncated_tool_calls
+            .push(("call-1".to_string(), "Write".to_string()));
+
+        match TurnOutcome::from_stream(outcome) {
+            TurnOutcome::Truncated(outcome) => {
+                assert_eq!(
+                    outcome.truncated_tool_calls,
+                    vec![("call-1".to_string(), "Write".to_string())]
+                );
+            }
+            _ => panic!("expected Truncated"),
+        }
     }
 
     #[test]

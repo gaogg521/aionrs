@@ -445,6 +445,10 @@ impl AgentEngine {
                     });
                 }
                 TurnOutcome::Truncated(outcome) => {
+                    if !outcome.truncated_tool_calls.is_empty() {
+                        self.recover_truncated_tool_call(outcome);
+                        continue;
+                    }
                     return self.continue_truncated(outcome, guards.counted_turns()).await;
                 }
                 TurnOutcome::EmptyFinal(outcome) => {
@@ -752,6 +756,44 @@ impl AgentEngine {
         .await
     }
 
+    /// A tool call (e.g. a large `Write`) was still streaming when the output
+    /// limit cut the response off. Unlike a plain truncated answer, this is
+    /// safe to just retry from scratch: the tool was never executed, so
+    /// nothing needs to be undone, and the tool itself (e.g. `Write`) is a
+    /// full, idempotent overwrite. Record what happened, tell the model its
+    /// call did not go through, and let the caller loop back into a normal
+    /// turn with tools still enabled.
+    fn recover_truncated_tool_call(&mut self, outcome: StreamOutcome) {
+        const RETRY_PROMPT: &str = "Your previous tool call was cut off by the output limit before it completed. \
+            It was not executed — nothing was written or changed. Call it again now to complete the action.";
+
+        let names: Vec<&str> = outcome
+            .truncated_tool_calls
+            .iter()
+            .map(|(_, name)| name.as_str())
+            .collect();
+        debug!(
+            target: "aion_agent",
+            truncated_tool_calls = names.len(),
+            "tool call(s) truncated mid-stream by the output limit; retrying with tools enabled"
+        );
+        self.output.emit_info(&format!(
+            "Tool call(s) {} were cut off by the output limit before completing; nothing was executed. Retrying now.",
+            names.join(", ")
+        ));
+
+        let content = build_truncated_assistant_content(&outcome);
+        if !content.is_empty() {
+            self.messages.push(Message::now(Role::Assistant, content));
+        }
+        self.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: RETRY_PROMPT.to_string(),
+            }],
+        ));
+    }
+
     /// Resume a response the provider cut off at the output token limit.
     ///
     /// A single continuation only suffices when the answer was barely over the
@@ -936,6 +978,7 @@ impl AgentEngine {
         let mut thinking_signature: Option<String> = None;
         let mut provider_items: Vec<ContentBlock> = Vec::new();
         let mut tool_calls: Vec<ContentBlock> = Vec::new();
+        let mut truncated_tool_calls: Vec<(String, String)> = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = TokenUsage::default();
 
@@ -971,6 +1014,15 @@ impl AgentEngine {
                 LlmEvent::ThinkingSignature(signature) => {
                     thinking_signature = Some(signature);
                 }
+                LlmEvent::ToolCallTruncated { id, name } => {
+                    debug!(
+                        target: "aion_agent",
+                        tool_use_id = %id,
+                        tool = %name,
+                        "tool call truncated mid-stream by the output limit"
+                    );
+                    truncated_tool_calls.push((id, name));
+                }
                 LlmEvent::ProviderItem { provider, item } => {
                     provider_items.push(ContentBlock::ProviderItem { provider, item });
                 }
@@ -993,6 +1045,7 @@ impl AgentEngine {
             thinking_signature,
             provider_items,
             tool_calls,
+            truncated_tool_calls,
             stop_reason,
             usage,
         })

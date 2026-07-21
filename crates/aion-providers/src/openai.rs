@@ -257,6 +257,21 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id:
                 }
             }
             "length" => {
+                // A tool call may still have been mid-stream when the output
+                // limit hit: its accumulated `arguments` is an incomplete
+                // JSON fragment that can never be completed or executed.
+                // Surface it as a distinct truncation marker (not a real
+                // ToolUse) instead of silently dropping it, so the agent
+                // layer can tell the user what happened and retry with tools
+                // still enabled.
+                for tc in state.tool_calls.drain(..) {
+                    let id = if tc.id.is_empty() && auto_tool_id {
+                        generate_call_id()
+                    } else {
+                        tc.id
+                    };
+                    events.push(LlmEvent::ToolCallTruncated { id, name: tc.name });
+                }
                 state.pending_done = Some(LlmEvent::Done {
                     stop_reason: StopReason::MaxTokens,
                     usage: TokenUsage::default(),

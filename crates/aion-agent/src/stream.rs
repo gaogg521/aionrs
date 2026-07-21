@@ -10,6 +10,11 @@ pub(crate) struct StreamOutcome {
     pub(crate) thinking_signature: Option<String>,
     pub(crate) provider_items: Vec<ContentBlock>,
     pub(crate) tool_calls: Vec<ContentBlock>,
+    /// Tool calls whose arguments were still streaming when the output
+    /// limit cut the response off — `(tool_use_id, tool_name)`. Never
+    /// executed; only used to surface the truncation and retry with tools
+    /// enabled instead of silently dropping the attempt.
+    pub(crate) truncated_tool_calls: Vec<(String, String)>,
     pub(crate) stop_reason: StopReason,
     pub(crate) usage: TokenUsage,
 }
