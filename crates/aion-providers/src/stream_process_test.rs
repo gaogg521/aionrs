@@ -175,6 +175,82 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    fn anthropic_sse_body(include_message_stop: bool) -> Vec<u8> {
+        let mut body = String::new();
+        body.push_str("event: content_block_start\n");
+        body.push_str(&format!(
+            "data: {}\n\n",
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+        ));
+        body.push_str("event: content_block_delta\n");
+        body.push_str(&format!(
+            "data: {}\n\n",
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}})
+        ));
+        body.push_str("event: message_delta\n");
+        body.push_str(&format!(
+            "data: {}\n\n",
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}})
+        ));
+        if include_message_stop {
+            body.push_str("event: message_stop\n");
+            body.push_str(&format!("data: {}\n\n", json!({"type": "message_stop"})));
+        }
+        body.into_bytes()
+    }
+
+    #[tokio::test]
+    async fn anthropic_sse_stream_completes_with_message_stop() {
+        let response = mock_response(anthropic_sse_body(true)).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_anthropic_sse_stream(response, &tx).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert!(matches!(outcome, StreamOutcome::Ok));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmEvent::TextDelta(text) if text == "Hello"))
+        );
+        assert!(events.iter().any(|e| matches!(e, LlmEvent::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn anthropic_sse_stream_without_message_stop_fails_partial() {
+        // message_delta (carrying stop_reason/Done) arrived, but the connection
+        // ended before the terminal message_stop event — e.g. a gateway EOF
+        // right after the last content chunk. Content was already streamed, so
+        // this must surface as FailedPartial rather than silently reporting Ok.
+        let response = mock_response(anthropic_sse_body(false)).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_anthropic_sse_stream(response, &tx).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert!(matches!(outcome, StreamOutcome::FailedPartial(_)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmEvent::TextDelta(text) if text == "Hello"))
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_sse_stream_eof_without_any_content_fails_empty() {
+        let response = mock_response(Vec::new()).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_anthropic_sse_stream(response, &tx).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert!(matches!(outcome, StreamOutcome::FailedEmpty(_)));
+        assert!(events.is_empty());
+    }
+
     #[tokio::test]
     async fn bedrock_event_stream_decodes_payloads_into_llm_events() {
         let mut body = Vec::new();

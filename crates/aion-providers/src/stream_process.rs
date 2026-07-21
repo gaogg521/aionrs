@@ -177,6 +177,7 @@ pub(crate) async fn process_anthropic_sse_stream(
     let mut framer = SseBlockFramer::default();
     let mut stream = response.bytes_stream();
     let mut emitted_content = false;
+    let mut message_stop_seen = false;
 
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
@@ -192,6 +193,9 @@ pub(crate) async fn process_anthropic_sse_stream(
         };
         let text = String::from_utf8_lossy(&chunk);
         for frame in framer.push_text(&text) {
+            if frame.event.as_deref() == Some("message_stop") {
+                message_stop_seen = true;
+            }
             let events = parser.parse_frame(&frame, &mut state);
             for event in events {
                 if matches!(
@@ -216,7 +220,20 @@ pub(crate) async fn process_anthropic_sse_stream(
         }
     }
 
-    StreamOutcome::Ok
+    if message_stop_seen {
+        return StreamOutcome::Ok;
+    }
+
+    // The connection ended (gateway EOF, idle timeout, etc.) before the
+    // terminal `message_stop` event arrived. Same class of bug as the OpenAI
+    // Chat Completions path above: without this check the turn would report
+    // success even though the model's response never actually completed.
+    let error = ProviderError::Connection("Anthropic stream ended without a terminal message_stop event".to_string());
+    if emitted_content {
+        StreamOutcome::FailedPartial(error)
+    } else {
+        StreamOutcome::FailedEmpty(error)
+    }
 }
 
 pub(crate) async fn process_bedrock_aws_event_stream(
