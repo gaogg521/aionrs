@@ -77,6 +77,16 @@ mod json_error_body_tests {
     }
 
     #[test]
+    fn null_error_field_is_not_mapped_to_an_error() {
+        // Normal 200 bodies from some gateways carry `"error": null`; they
+        // must pass through untouched on both the transport and SSE paths.
+        let body_text = r#"{"error":null,"choices":[{"message":{"content":"hi"}}]}"#;
+        let body = serde_json::from_str(body_text).expect("test body should be valid JSON");
+
+        assert!(provider_error_from_json_body(&body, body_text.as_bytes()).is_none());
+    }
+
+    #[test]
     fn rate_limit_status_maps_to_rate_limited_with_body() {
         let body_text = r#"{"error":{"code":429,"message":"quota exceeded"}}"#;
         let body = serde_json::from_str(body_text).expect("test body should be valid JSON");

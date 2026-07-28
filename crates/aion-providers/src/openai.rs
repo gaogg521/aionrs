@@ -162,11 +162,13 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id:
     let delta = &choice["delta"];
 
     // Reasoning content (OpenAI reasoning models). Some OpenAI-compatible
-    // gateways stream it under `reasoning` instead of `reasoning_content`.
+    // gateways stream it under `reasoning` instead of `reasoning_content`,
+    // and some send an empty `reasoning_content` placeholder alongside the
+    // real `reasoning` payload — an empty field must not shadow the other.
     if let Some(reasoning) = delta["reasoning_content"]
         .as_str()
-        .or_else(|| delta["reasoning"].as_str())
-        && !reasoning.is_empty()
+        .filter(|text| !text.is_empty())
+        .or_else(|| delta["reasoning"].as_str().filter(|text| !text.is_empty()))
     {
         events.push(LlmEvent::ThinkingDelta(reasoning.to_string()));
     }

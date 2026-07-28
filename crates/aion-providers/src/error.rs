@@ -33,7 +33,10 @@ impl ProviderError {
 /// embedded in SSE streams. Returns `None` when the body does not look like
 /// an error payload.
 pub(crate) fn provider_error_from_json_body(body: &Value, body_bytes: &[u8]) -> Option<ProviderError> {
-    let error = body.get("error").unwrap_or(body);
+    // Some gateways include `"error": null` in perfectly normal responses;
+    // treat a null error field the same as an absent one.
+    let error_field = body.get("error").filter(|error| !error.is_null());
+    let error = error_field.unwrap_or(body);
     let status = [
         error.get("code"),
         error.get("status"),
@@ -59,7 +62,7 @@ pub(crate) fn provider_error_from_json_body(body: &Value, body_bytes: &[u8]) -> 
             body: (!body_bytes.is_empty()).then(|| String::from_utf8_lossy(body_bytes).into_owned()),
         }),
         Some(status) => Some(ProviderError::Api { status, message }),
-        None if body.get("error").is_some() => Some(ProviderError::Parse(format!(
+        None if error_field.is_some() => Some(ProviderError::Parse(format!(
             "Provider returned a JSON error response without an HTTP status: {message}"
         ))),
         None => None,

@@ -473,7 +473,6 @@ impl AgentEngine {
             self.max_tool_call_malformed_turns,
             self.max_tool_call_failure_turns,
         );
-        let mut empty_final_retried = false;
         loop {
             if let Some(limit) = guards.turn_budget_reached() {
                 self.save_session();
@@ -525,16 +524,17 @@ impl AgentEngine {
                         .await;
                 }
                 TurnOutcome::EmptyFinal(outcome) => {
+                    let retry_allowed = guards.allow_empty_final_retry();
                     warn!(
                         target: "aion_agent",
                         stop_reason = ?outcome.stop_reason,
                         assistant_text_bytes = outcome.assistant_text.len(),
                         thinking_text_bytes = outcome.thinking_text.len(),
                         tool_call_count = outcome.tool_calls.len(),
-                        retried = empty_final_retried,
+                        retried = !retry_allowed,
                         "provider turn produced no valid final answer"
                     );
-                    if empty_final_retried {
+                    if !retry_allowed {
                         return self
                             .finalize_once(
                                 FinalizationReason::EmptyFinal,
@@ -549,7 +549,6 @@ impl AgentEngine {
                     // so a model that hid its tool call in reasoning can
                     // re-issue it properly instead of being forced into a
                     // tool-less finalization answer.
-                    empty_final_retried = true;
                     let retry_blocks = vec![ContentBlock::Text {
                         text: EMPTY_FINAL_RETRY_PROMPT.to_string(),
                     }];

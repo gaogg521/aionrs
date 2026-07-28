@@ -207,6 +207,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_sse_stream_cut_off_after_reasoning_only_fails_empty() {
+        // Thinking deltas alone must not block a retry: no answer content
+        // reached the consumer, so the cut-off stream is safe to re-run.
+        let reasoning = json!({
+            "choices": [{
+                "delta": {"reasoning_content": "pondering"},
+                "finish_reason": null
+            }]
+        });
+        let response = mock_response(format!("data: {reasoning}\n\n").into_bytes()).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_openai_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], LlmEvent::ThinkingDelta(text) if text == "pondering"));
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedEmpty(ProviderError::Connection(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn openai_sse_stream_embedded_error_frame_fails_empty() {
         let error = json!({
             "error": {"code": 500, "message": "upstream exploded"}

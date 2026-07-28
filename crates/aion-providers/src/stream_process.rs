@@ -7,6 +7,7 @@ use aion_types::message::{StopReason, TokenUsage};
 
 use crate::error::ProviderError;
 use crate::framing::{FrameKind, SseBlockFramer, SseLineFramer, Utf8StreamDecoder, bedrock_payload_to_frame};
+use crate::openai::StreamState as OpenAiStreamState;
 use crate::parser::{AnthropicParser, OpenAiParser, OpenAiResponsesParser, ResponseParser};
 use crate::stream_diagnostics::StreamTermination;
 use crate::stream_runner::StreamOutcome;
@@ -111,6 +112,27 @@ pub(crate) async fn process_openai_responses_sse_stream(
     }
 }
 
+/// Pick the failure outcome for a broken stream: retryable when no answer
+/// content reached the consumer, terminal otherwise.
+fn failed_stream_outcome(emitted_answer: bool, error: ProviderError) -> StreamOutcome {
+    if emitted_answer {
+        StreamOutcome::FailedPartial(error)
+    } else {
+        StreamOutcome::FailedEmpty(error)
+    }
+}
+
+/// Fail the stream if the parser recorded an in-stream error frame.
+fn take_openai_stream_failure(
+    state: &mut OpenAiStreamState,
+    emitted_answer: bool,
+    started_at: Instant,
+) -> Option<StreamOutcome> {
+    let error = state.take_stream_error()?;
+    state.emit_diagnostics(StreamTermination::ProviderError, started_at.elapsed());
+    Some(failed_stream_outcome(emitted_answer, error))
+}
+
 pub(crate) async fn process_openai_sse_stream(
     response: reqwest::Response,
     tx: &mpsc::Sender<LlmEvent>,
@@ -127,7 +149,9 @@ pub(crate) async fn process_openai_sse_stream(
     let mut framer = SseLineFramer::default();
     let mut decoder = Utf8StreamDecoder::default();
     let mut stream = response.bytes_stream();
-    let mut emitted_content = false;
+    // Only visible answer content (text/tool calls) blocks a stream retry;
+    // a turn that produced nothing but reasoning deltas is safe to re-run.
+    let mut emitted_answer = false;
     let mut emitted_done = false;
 
     while let Some(chunk) = stream.next().await {
@@ -135,13 +159,8 @@ pub(crate) async fn process_openai_sse_stream(
             Ok(c) => c,
             Err(e) => {
                 let err = ProviderError::Connection(e.to_string());
-                let outcome = if emitted_content {
-                    StreamOutcome::FailedPartial(err)
-                } else {
-                    StreamOutcome::FailedEmpty(err)
-                };
                 state.emit_diagnostics(StreamTermination::ConnectionError, started_at.elapsed());
-                return outcome;
+                return failed_stream_outcome(emitted_answer, err);
             }
         };
         state.diagnostics_mut().observe_network_chunk(chunk.len());
@@ -152,24 +171,16 @@ pub(crate) async fn process_openai_sse_stream(
             let events = parser.parse_frame(&frame, &mut state);
             for event in events {
                 state.diagnostics_mut().observe_event(&event);
-                if matches!(
-                    event,
-                    LlmEvent::TextDelta(_) | LlmEvent::ThinkingDelta(_) | LlmEvent::ToolUse { .. }
-                ) {
-                    emitted_content = true;
+                if matches!(event, LlmEvent::TextDelta(_) | LlmEvent::ToolUse { .. }) {
+                    emitted_answer = true;
                 }
                 if tx.send(event).await.is_err() {
                     state.emit_diagnostics(StreamTermination::ConsumerDropped, started_at.elapsed());
                     return StreamOutcome::Ok;
                 }
             }
-            if let Some(error) = state.take_stream_error() {
-                state.emit_diagnostics(StreamTermination::ProviderError, started_at.elapsed());
-                return if emitted_content {
-                    StreamOutcome::FailedPartial(error)
-                } else {
-                    StreamOutcome::FailedEmpty(error)
-                };
+            if let Some(outcome) = take_openai_stream_failure(&mut state, emitted_answer, started_at) {
+                return outcome;
             }
             if is_done {
                 state.emit_diagnostics(StreamTermination::Done, started_at.elapsed());
@@ -186,24 +197,16 @@ pub(crate) async fn process_openai_sse_stream(
         let events = parser.parse_frame(&frame, &mut state);
         for event in events {
             state.diagnostics_mut().observe_event(&event);
-            if matches!(
-                event,
-                LlmEvent::TextDelta(_) | LlmEvent::ThinkingDelta(_) | LlmEvent::ToolUse { .. }
-            ) {
-                emitted_content = true;
+            if matches!(event, LlmEvent::TextDelta(_) | LlmEvent::ToolUse { .. }) {
+                emitted_answer = true;
             }
             if tx.send(event).await.is_err() {
                 state.emit_diagnostics(StreamTermination::ConsumerDropped, started_at.elapsed());
                 return StreamOutcome::Ok;
             }
         }
-        if let Some(error) = state.take_stream_error() {
-            state.emit_diagnostics(StreamTermination::ProviderError, started_at.elapsed());
-            return if emitted_content {
-                StreamOutcome::FailedPartial(error)
-            } else {
-                StreamOutcome::FailedEmpty(error)
-            };
+        if let Some(outcome) = take_openai_stream_failure(&mut state, emitted_answer, started_at) {
+            return outcome;
         }
         if is_done {
             state.emit_diagnostics(StreamTermination::Done, started_at.elapsed());
@@ -230,15 +233,11 @@ pub(crate) async fn process_openai_sse_stream(
     }
 
     // EOF without any terminal signal: the stream was cut off. Fail it so the
-    // runner can retry (empty) or surface an error (partial) instead of
-    // reporting an empty successful turn.
+    // runner can retry (no answer content) or surface an error (partial
+    // answer) instead of reporting an empty successful turn.
     let error = ProviderError::Connection("OpenAI stream ended without a terminal event".to_string());
     state.emit_diagnostics(StreamTermination::EofWithoutTerminal, started_at.elapsed());
-    if emitted_content {
-        StreamOutcome::FailedPartial(error)
-    } else {
-        StreamOutcome::FailedEmpty(error)
-    }
+    failed_stream_outcome(emitted_answer, error)
 }
 
 pub(crate) async fn process_anthropic_sse_stream(

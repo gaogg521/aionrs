@@ -326,6 +326,21 @@ mod tests {
     }
 
     #[test]
+    fn empty_reasoning_content_placeholder_does_not_shadow_reasoning() {
+        // Some gateways send `reasoning_content: ""` in every chunk alongside
+        // the real `reasoning` payload; the empty placeholder must not
+        // short-circuit the fallback.
+        let mut state = StreamState::new();
+
+        let chunk =
+            r#"{"choices":[{"delta":{"reasoning_content":"","reasoning":"real thinking"},"finish_reason":null}]}"#;
+        let events = parse_sse_chunk(chunk, &mut state, false);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], LlmEvent::ThinkingDelta(text) if text == "real thinking"));
+    }
+
+    #[test]
     fn reasoning_content_takes_precedence_over_reasoning() {
         let mut state = StreamState::new();
 

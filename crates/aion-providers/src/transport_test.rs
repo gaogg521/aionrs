@@ -379,6 +379,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_transport_preserves_successful_json_with_null_error_field() {
+        let server = MockServer::start().await;
+        let response_body = json!({
+            "error": null,
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "hello"
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&server)
+            .await;
+        let transport = ProviderTransport::OpenAi(OpenAiTransport::new("test-key", &server.uri()));
+        let compat = ProviderCompat::openai_defaults();
+        let (body, tool_wire_shape) = transport
+            .project_body(&test_request(vec![]), &compat)
+            .expect("request body projection should succeed");
+        let request = transport
+            .build_projected_request("test-model", body, &compat, tool_wire_shape)
+            .expect("projected request should build");
+
+        let response = transport
+            .send(request)
+            .await
+            .expect("a null error field must not fail a successful response");
+
+        assert_eq!(
+            response
+                .json::<Value>()
+                .await
+                .expect("preserved response should remain valid JSON"),
+            response_body
+        );
+    }
+
+    #[tokio::test]
     async fn openai_transport_preserves_large_successful_json_response() {
         let server = MockServer::start().await;
         let response_body = json!({
