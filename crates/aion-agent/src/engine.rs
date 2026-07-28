@@ -57,6 +57,12 @@ pub struct AgentResult {
     pub turns: usize,
 }
 
+/// Corrective prompt injected before the single tool-enabled retry that
+/// follows an empty final response. Some models put the intended tool call
+/// (or the whole answer) inside reasoning content; a normal turn with tools
+/// still available lets them recover, unlike the tool-less finalization path.
+const EMPTY_FINAL_RETRY_PROMPT: &str = "The previous response contained no visible answer text. Respond again now: provide the answer as visible text, or issue the intended tool call as a proper tool call. Do not leave the answer or tool calls inside reasoning.";
+
 pub struct AgentEngine {
     // Provider request configuration.
     /// Shared LLM provider used to issue model requests.
@@ -467,6 +473,7 @@ impl AgentEngine {
             self.max_tool_call_malformed_turns,
             self.max_tool_call_failure_turns,
         );
+        let mut empty_final_retried = false;
         loop {
             if let Some(limit) = guards.turn_budget_reached() {
                 self.save_session();
@@ -524,16 +531,32 @@ impl AgentEngine {
                         assistant_text_bytes = outcome.assistant_text.len(),
                         thinking_text_bytes = outcome.thinking_text.len(),
                         tool_call_count = outcome.tool_calls.len(),
-                        "provider turn produced no valid final answer; retrying finalization"
+                        retried = empty_final_retried,
+                        "provider turn produced no valid final answer"
                     );
-                    return self
-                        .finalize_once(
-                            FinalizationReason::EmptyFinal,
-                            outcome.assistant_text,
-                            guards.counted_turns(),
-                            StopReason::EndTurn,
-                        )
-                        .await;
+                    if empty_final_retried {
+                        return self
+                            .finalize_once(
+                                FinalizationReason::EmptyFinal,
+                                outcome.assistant_text,
+                                guards.counted_turns(),
+                                StopReason::EndTurn,
+                            )
+                            .await;
+                    }
+
+                    // First retry runs as a normal turn with tools available,
+                    // so a model that hid its tool call in reasoning can
+                    // re-issue it properly instead of being forced into a
+                    // tool-less finalization answer.
+                    empty_final_retried = true;
+                    let retry_blocks = vec![ContentBlock::Text {
+                        text: EMPTY_FINAL_RETRY_PROMPT.to_string(),
+                    }];
+                    self.record_local_context_addition(estimate_content_tokens(&retry_blocks));
+                    self.messages.push(Message::now(Role::User, retry_blocks));
+                    self.save_session();
+                    continue;
                 }
             };
 
