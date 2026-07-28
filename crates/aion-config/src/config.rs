@@ -402,9 +402,12 @@ impl Config {
             .prompt_caching
             .unwrap_or(matches!(provider, ProviderType::Anthropic));
 
-        // Resolve compat: provider-type defaults + user overrides
+        // Resolve compat: provider-type defaults + user overrides. The
+        // official OpenAI endpoint gets its own preset (newer models reject
+        // the legacy `max_tokens` parameter).
         let compat_defaults = match provider {
             ProviderType::Anthropic => ProviderCompat::anthropic_defaults(),
+            ProviderType::OpenAI if is_openai_official_url(&base_url) => ProviderCompat::openai_official_defaults(),
             ProviderType::OpenAI => ProviderCompat::openai_defaults(),
             ProviderType::Bedrock => ProviderCompat::bedrock_defaults(),
             ProviderType::Vertex => ProviderCompat::anthropic_defaults(),
@@ -458,6 +461,21 @@ fn resolve_cli_thinking(
         Some(other) => anyhow::bail!("Invalid --thinking value: {other}. Expected 'enabled' or 'disabled'."),
         None => Ok(None),
     }
+}
+
+/// True when the base URL targets the official OpenAI API host
+/// (`api.openai.com`), as opposed to an OpenAI-compatible third-party
+/// endpoint. Matches the host exactly to avoid look-alike domains.
+fn is_openai_official_url(base_url: &str) -> bool {
+    let lower = base_url.trim().to_ascii_lowercase();
+    for prefix in ["https://api.openai.com", "http://api.openai.com"] {
+        if let Some(rest) = lower.strip_prefix(prefix)
+            && (rest.is_empty() || rest.starts_with('/') || rest.starts_with(':'))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn normalize_base_url(provider: ProviderType, base_url: String) -> String {
@@ -919,7 +937,7 @@ default = "auto"                 # auto, powershell, pwsh, cmd, bash, zsh, sh, o
 # Provider compatibility overrides (usually not needed — defaults work)
 # [providers.openai.compat]
 # openai_api_mode = "responses"               # default: "chat_completions"
-# max_tokens_field = "max_completion_tokens"  # for OpenAI official models
+# max_tokens_field = "max_tokens"             # default: "max_completion_tokens" on api.openai.com, "max_tokens" elsewhere
 # merge_assistant_messages = true
 # clean_orphan_tool_calls = true
 # dedup_tool_results = true
