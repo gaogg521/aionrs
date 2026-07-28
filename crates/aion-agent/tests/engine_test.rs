@@ -472,32 +472,91 @@ async fn empty_final_gets_one_visible_answer_nudge() {
 
     assert_eq!(result.text, "Visible answer");
     assert_eq!(result.stop_reason, StopReason::EndTurn);
-    assert_eq!(result.turns, 1);
+    // The nudge retry runs as a counted normal turn.
+    assert_eq!(result.turns, 2);
 
     let recorded = requests.lock().unwrap();
     assert_eq!(recorded.len(), 2);
-    assert_eq!(recorded[1].tool_count, 0);
+    // The first retry keeps tools available so a model that hid its tool
+    // call in reasoning can re-issue it properly.
+    assert_eq!(recorded[1].tool_count, 1);
     assert!(
         !contains_empty_assistant_message(&recorded[1].messages),
-        "empty finalization request must not include empty assistant content"
+        "empty-final retry request must not include empty assistant content"
     );
     let last_message = recorded[1]
         .messages
         .last()
-        .expect("finalization request should include control prompt");
+        .expect("retry request should include the corrective prompt");
     assert_eq!(last_message.role, Role::User);
     assert!(
         matches!(
             &last_message.content[..],
             [ContentBlock::Text { text }] if text.contains("visible answer text")
         ),
-        "empty finalization prompt should ask for visible answer text"
+        "empty-final retry prompt should ask for visible answer text"
+    );
+}
+
+#[tokio::test]
+async fn empty_final_retry_can_recover_through_a_tool_call() {
+    // Reproduces the reasoning-only turn: the model "answers" with thinking
+    // content only (e.g. a tool call written into reasoning), then uses the
+    // tool-enabled retry to issue the real tool call and finish the task.
+    let provider = Arc::new(FullRecordingRequestProvider::new(vec![
+        vec![
+            LlmEvent::ThinkingDelta("{\"tool\":\"mock_tool\"}".to_string()),
+            LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            },
+        ],
+        vec![
+            LlmEvent::ToolUse {
+                id: "call-1".to_string(),
+                name: "mock_tool".to_string(),
+                input: json!({}),
+                extra: None,
+            },
+            LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            },
+        ],
+        vec![
+            LlmEvent::TextDelta("Recovered answer".to_string()),
+            LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            },
+        ],
+    ]));
+    let requests = provider.requests();
+
+    let config = test_config();
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new("mock_tool", "tool output", false)));
+    let output = silent_output();
+
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
+    let result = engine.run("Do the task", "").await.expect("engine should succeed");
+
+    assert_eq!(result.text, "Recovered answer");
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 3);
+    assert_eq!(
+        recorded[1].tool_count, 1,
+        "retry after the reasoning-only turn must keep tools available"
     );
 }
 
 #[tokio::test]
 async fn empty_final_falls_back_after_one_empty_retry() {
     let dir = tempdir().expect("tempdir should be created");
+    // Empty normal turn, empty tool-enabled retry, then an empty tool-less
+    // finalization turn — the run must still fall back to visible text.
     let provider = Arc::new(FullRecordingRequestProvider::new(vec![
         vec![LlmEvent::Done {
             stop_reason: StopReason::EndTurn,
@@ -507,7 +566,12 @@ async fn empty_final_falls_back_after_one_empty_retry() {
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }],
+        vec![LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        }],
     ]));
+    let requests = provider.requests();
 
     let mut config = test_config();
     config.session.enabled = true;
@@ -525,8 +589,16 @@ async fn empty_final_falls_back_after_one_empty_retry() {
         .expect("engine should fall back successfully");
 
     assert_eq!(result.stop_reason, StopReason::EndTurn);
-    assert_eq!(result.turns, 1);
+    assert_eq!(result.turns, 2);
     assert!(result.text.contains("finished without visible answer text"));
+
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 3);
+    assert_eq!(
+        recorded[2].tool_count, 0,
+        "final finalization turn after the retry must disable tools"
+    );
+    drop(recorded);
 
     let session = SessionManager::new(dir.path().to_path_buf(), 10)
         .load("latest")

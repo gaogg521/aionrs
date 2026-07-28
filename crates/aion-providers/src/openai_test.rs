@@ -265,4 +265,90 @@ mod tests {
             assert!(id.is_empty(), "id should remain empty when auto_tool_id is disabled");
         }
     }
+
+    // --- in-stream error frames ---
+
+    #[test]
+    fn error_frame_is_recorded_and_emits_no_events() {
+        let mut state = StreamState::new();
+
+        let chunk = r#"{"error":{"code":500,"message":"upstream exploded"}}"#;
+        let events = parse_sse_chunk(chunk, &mut state, false);
+
+        assert!(events.is_empty());
+        let error = state.take_stream_error().expect("error frame should be recorded");
+        assert!(matches!(
+            error,
+            ProviderError::Api { status: 500, message } if message == "upstream exploded"
+        ));
+        assert!(state.take_stream_error().is_none(), "take should consume the error");
+    }
+
+    #[test]
+    fn error_frame_without_status_is_recorded_as_parse_error() {
+        let mut state = StreamState::new();
+
+        let chunk = r#"{"error":{"message":"upstream exploded"}}"#;
+        let events = parse_sse_chunk(chunk, &mut state, false);
+
+        assert!(events.is_empty());
+        assert!(matches!(
+            state.take_stream_error().expect("error frame should be recorded"),
+            ProviderError::Parse(_)
+        ));
+    }
+
+    #[test]
+    fn null_error_field_is_not_treated_as_an_error() {
+        // Some gateways include `"error": null` in normal chunks.
+        let mut state = StreamState::new();
+
+        let chunk = r#"{"error":null,"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#;
+        let events = parse_sse_chunk(chunk, &mut state, false);
+
+        assert!(matches!(&events[0], LlmEvent::TextDelta(text) if text == "hi"));
+        assert!(state.take_stream_error().is_none());
+    }
+
+    // --- reasoning field compatibility ---
+
+    #[test]
+    fn reasoning_field_is_mapped_to_thinking_delta() {
+        // OpenAI-compatible gateways may stream reasoning under `reasoning`
+        // instead of `reasoning_content`.
+        let mut state = StreamState::new();
+
+        let chunk = r#"{"choices":[{"delta":{"reasoning":"thinking..."},"finish_reason":null}]}"#;
+        let events = parse_sse_chunk(chunk, &mut state, false);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], LlmEvent::ThinkingDelta(text) if text == "thinking..."));
+    }
+
+    #[test]
+    fn empty_reasoning_content_placeholder_does_not_shadow_reasoning() {
+        // Some gateways send `reasoning_content: ""` in every chunk alongside
+        // the real `reasoning` payload; the empty placeholder must not
+        // short-circuit the fallback.
+        let mut state = StreamState::new();
+
+        let chunk =
+            r#"{"choices":[{"delta":{"reasoning_content":"","reasoning":"real thinking"},"finish_reason":null}]}"#;
+        let events = parse_sse_chunk(chunk, &mut state, false);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], LlmEvent::ThinkingDelta(text) if text == "real thinking"));
+    }
+
+    #[test]
+    fn reasoning_content_takes_precedence_over_reasoning() {
+        let mut state = StreamState::new();
+
+        let chunk =
+            r#"{"choices":[{"delta":{"reasoning_content":"primary","reasoning":"secondary"},"finish_reason":null}]}"#;
+        let events = parse_sse_chunk(chunk, &mut state, false);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], LlmEvent::ThinkingDelta(text) if text == "primary"));
+    }
 }

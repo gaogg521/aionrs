@@ -6,7 +6,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::bedrock::BedrockTransportState;
-use crate::error::ProviderError;
+use crate::error::{ProviderError, provider_error_from_json_body};
 use crate::openai_responses_projector::OpenAiResponsesProjector;
 use crate::projector::{
     AnthropicWireProjector, OpenAiProjector, ResolvedToolWireShape, WireParams, WireProvider,
@@ -345,7 +345,7 @@ async fn inspect_success_json_response(
     }
 
     if let Ok(body) = serde_json::from_slice::<Value>(&body_bytes)
-        && let Some(error) = map_success_json_error(&body, &body_bytes)
+        && let Some(error) = provider_error_from_json_body(&body, &body_bytes)
     {
         let provider_status = provider_error_status(&error);
         tracing::warn!(
@@ -357,40 +357,6 @@ async fn inspect_success_json_response(
     }
 
     rebuild_response(status, version, headers, url, body_bytes)
-}
-
-fn map_success_json_error(body: &Value, body_bytes: &[u8]) -> Option<ProviderError> {
-    let error = body.get("error").unwrap_or(body);
-    let status = [
-        error.get("code"),
-        error.get("status"),
-        body.get("code"),
-        body.get("status"),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(json_http_status_code);
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| error.as_str())
-        .or_else(|| body.get("message").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|message| !message.is_empty())
-        .unwrap_or("Provider returned a JSON error response without a message")
-        .to_string();
-
-    match status {
-        Some(429) => Some(ProviderError::RateLimited {
-            retry_after_ms: 5000,
-            body: (!body_bytes.is_empty()).then(|| String::from_utf8_lossy(body_bytes).into_owned()),
-        }),
-        Some(status) => Some(ProviderError::Api { status, message }),
-        None if body.get("error").is_some() => Some(ProviderError::Parse(format!(
-            "Provider returned a JSON error response without an HTTP status: {message}"
-        ))),
-        None => None,
-    }
 }
 
 fn rebuild_response<B>(
@@ -411,14 +377,6 @@ where
         .map_err(|error| ProviderError::Connection(format!("Failed to preserve provider response: {error}")))?;
     *response.headers_mut() = headers;
     Ok(reqwest::Response::from(response))
-}
-
-fn json_http_status_code(value: &Value) -> Option<u16> {
-    value
-        .as_u64()
-        .and_then(|status| u16::try_from(status).ok())
-        .or_else(|| value.as_str().and_then(|status| status.parse().ok()))
-        .filter(|status| (400..=599).contains(status))
 }
 
 fn provider_error_status(error: &ProviderError) -> Option<u16> {

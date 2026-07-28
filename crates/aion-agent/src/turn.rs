@@ -134,6 +134,9 @@ pub(crate) struct TurnGuards {
     all_error_tool_rounds: ToolCallAllErrorRoundTracker,
     tool_call_cycles: ToolCallCycleTracker,
     tool_call_cycle_warning_emitted: bool,
+    /// Whether the single tool-enabled retry after an empty final response
+    /// has been spent for this run.
+    empty_final_retried: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,7 +201,19 @@ impl TurnGuards {
             }),
             tool_call_cycles: ToolCallCycleTracker::new(tool_failure_guards_enabled),
             tool_call_cycle_warning_emitted: false,
+            empty_final_retried: false,
         }
+    }
+
+    /// Grant the single tool-enabled retry that follows an empty final
+    /// response. Returns `true` the first time it is called in a run and
+    /// `false` afterwards.
+    pub(crate) fn allow_empty_final_retry(&mut self) -> bool {
+        if self.empty_final_retried {
+            return false;
+        }
+        self.empty_final_retried = true;
+        true
     }
 
     pub(crate) fn counted_turns(&self) -> usize {

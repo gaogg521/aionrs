@@ -8,6 +8,7 @@ use aion_types::llm::{LlmEvent, LlmRequest};
 use aion_types::message::{StopReason, TokenUsage};
 
 use crate::composed::ComposedProvider;
+use crate::error::provider_error_from_json_body;
 use crate::openai_messages::generate_call_id;
 use crate::stream_diagnostics::{OpenAiStreamDiagnostics, StreamTermination};
 use crate::transport::{OpenAiTransport, ProviderTransport};
@@ -51,6 +52,10 @@ pub(crate) struct StreamState {
     /// Deferred Done event: populated when finish_reason arrives, emitted on
     /// [DONE] so the final usage-only chunk has a chance to update token counts.
     pending_done: Option<LlmEvent>,
+    /// Error payload carried inside a data frame of a 200-status stream
+    /// (e.g. `data: {"error": ...}`); the stream processor fails the stream
+    /// with it instead of letting the turn end as an empty success.
+    stream_error: Option<ProviderError>,
 }
 
 impl StreamState {
@@ -62,7 +67,13 @@ impl StreamState {
             cache_read_tokens: 0,
             diagnostics: OpenAiStreamDiagnostics::default(),
             pending_done: None,
+            stream_error: None,
         }
+    }
+
+    /// Take the provider error recorded from an in-stream error frame, if any.
+    pub(crate) fn take_stream_error(&mut self) -> Option<ProviderError> {
+        self.stream_error.take()
     }
 
     /// Emit the deferred Done event with up-to-date token counts.
@@ -120,6 +131,18 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id:
     };
     state.diagnostics.observe_json(&json);
 
+    // Some gateways deliver terminal errors as a data frame in a 200-status
+    // stream (`data: {"error": ...}`). Record the error so the stream
+    // processor fails the stream instead of producing an empty outcome.
+    if json.get("error").is_some_and(|error| !error.is_null()) {
+        state.stream_error = Some(
+            provider_error_from_json_body(&json, data.as_bytes()).unwrap_or_else(|| {
+                ProviderError::Parse("Provider returned an error payload inside a successful stream".to_string())
+            }),
+        );
+        return events;
+    }
+
     // Extract usage if present
     if let Some(usage) = json.get("usage") {
         state.input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(state.input_tokens);
@@ -138,9 +161,14 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id:
 
     let delta = &choice["delta"];
 
-    // Reasoning content (OpenAI reasoning models)
-    if let Some(reasoning) = delta["reasoning_content"].as_str()
-        && !reasoning.is_empty()
+    // Reasoning content (OpenAI reasoning models). Some OpenAI-compatible
+    // gateways stream it under `reasoning` instead of `reasoning_content`,
+    // and some send an empty `reasoning_content` placeholder alongside the
+    // real `reasoning` payload — an empty field must not shadow the other.
+    if let Some(reasoning) = delta["reasoning_content"]
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .or_else(|| delta["reasoning"].as_str().filter(|text| !text.is_empty()))
     {
         events.push(LlmEvent::ThinkingDelta(reasoning.to_string()));
     }
