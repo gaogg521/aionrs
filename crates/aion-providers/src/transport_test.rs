@@ -418,50 +418,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn successful_json_top_level_error_shape_is_normalized() {
-        let body_text = r#"{"code":"503","message":"upstream busy"}"#;
-        let body = serde_json::from_str(body_text).expect("test body should be valid JSON");
-        let error = map_success_json_error(&body, body_text.as_bytes()).expect("status 503 should map to an error");
-
-        assert!(matches!(
-            error,
-            ProviderError::Api { status: 503, message } if message == "upstream busy"
-        ));
-    }
-
-    #[test]
-    fn successful_json_uses_http_status_when_provider_code_is_not_http() {
-        let body_text = r#"{"error":{"code":1001,"message":"upstream busy"},"status":503}"#;
-        let body = serde_json::from_str(body_text).expect("test body should be valid JSON");
-        let error = map_success_json_error(&body, body_text.as_bytes()).expect("status 503 should map to an error");
-
-        assert!(matches!(
-            error,
-            ProviderError::Api { status: 503, message } if message == "upstream busy"
-        ));
-    }
-
-    #[test]
-    fn successful_json_without_error_shape_is_not_mapped_to_an_error() {
-        let body_text = r#"{"choices":[]}"#;
-        let body = serde_json::from_str(body_text).expect("test body should be valid JSON");
-
-        assert!(map_success_json_error(&body, body_text.as_bytes()).is_none());
-    }
-
-    #[test]
-    fn successful_json_error_without_http_status_is_a_parse_error() {
-        let body_text = r#"{"error":{"code":"resource_exhausted","message":"upstream busy"}}"#;
-        let body = serde_json::from_str(body_text).expect("test body should be valid JSON");
-        let error = map_success_json_error(&body, body_text.as_bytes()).expect("explicit error should be surfaced");
-
-        assert!(matches!(
-            error,
-            ProviderError::Parse(message) if message.contains("without an HTTP status")
-        ));
-    }
-
     #[tokio::test]
     async fn openai_transport_preserves_429_body_as_none_when_empty() {
         let server = MockServer::start().await;

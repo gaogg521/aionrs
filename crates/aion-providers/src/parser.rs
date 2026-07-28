@@ -51,8 +51,10 @@ impl ResponseParser for OpenAiParser {
         }
     }
 
-    fn finish(&self, _state: &mut Self::State) -> Vec<LlmEvent> {
-        Vec::new()
+    /// Flush the deferred Done at EOF so gateways that send `finish_reason`
+    /// but never a `[DONE]` sentinel still terminate the turn cleanly.
+    fn finish(&self, state: &mut Self::State) -> Vec<LlmEvent> {
+        state.flush_done().into_iter().collect()
     }
 }
 

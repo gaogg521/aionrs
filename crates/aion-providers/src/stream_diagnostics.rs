@@ -55,8 +55,10 @@ impl FinishReasonKind {
 pub(crate) enum StreamTermination {
     Done,
     Eof,
+    EofWithoutTerminal,
     ConsumerDropped,
     ConnectionError,
+    ProviderError,
 }
 
 impl StreamTermination {
@@ -64,8 +66,10 @@ impl StreamTermination {
         match self {
             Self::Done => "done",
             Self::Eof => "eof",
+            Self::EofWithoutTerminal => "eof_without_terminal",
             Self::ConsumerDropped => "consumer_dropped",
             Self::ConnectionError => "connection_error",
+            Self::ProviderError => "provider_error",
         }
     }
 }

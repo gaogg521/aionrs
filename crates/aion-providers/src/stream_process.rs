@@ -128,6 +128,7 @@ pub(crate) async fn process_openai_sse_stream(
     let mut decoder = Utf8StreamDecoder::default();
     let mut stream = response.bytes_stream();
     let mut emitted_content = false;
+    let mut emitted_done = false;
 
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
@@ -162,6 +163,14 @@ pub(crate) async fn process_openai_sse_stream(
                     return StreamOutcome::Ok;
                 }
             }
+            if let Some(error) = state.take_stream_error() {
+                state.emit_diagnostics(StreamTermination::ProviderError, started_at.elapsed());
+                return if emitted_content {
+                    StreamOutcome::FailedPartial(error)
+                } else {
+                    StreamOutcome::FailedEmpty(error)
+                };
+            }
             if is_done {
                 state.emit_diagnostics(StreamTermination::Done, started_at.elapsed());
                 return StreamOutcome::Ok;
@@ -177,10 +186,24 @@ pub(crate) async fn process_openai_sse_stream(
         let events = parser.parse_frame(&frame, &mut state);
         for event in events {
             state.diagnostics_mut().observe_event(&event);
+            if matches!(
+                event,
+                LlmEvent::TextDelta(_) | LlmEvent::ThinkingDelta(_) | LlmEvent::ToolUse { .. }
+            ) {
+                emitted_content = true;
+            }
             if tx.send(event).await.is_err() {
                 state.emit_diagnostics(StreamTermination::ConsumerDropped, started_at.elapsed());
                 return StreamOutcome::Ok;
             }
+        }
+        if let Some(error) = state.take_stream_error() {
+            state.emit_diagnostics(StreamTermination::ProviderError, started_at.elapsed());
+            return if emitted_content {
+                StreamOutcome::FailedPartial(error)
+            } else {
+                StreamOutcome::FailedEmpty(error)
+            };
         }
         if is_done {
             state.emit_diagnostics(StreamTermination::Done, started_at.elapsed());
@@ -188,16 +211,34 @@ pub(crate) async fn process_openai_sse_stream(
         }
     }
 
+    // `finish` flushes the deferred Done for gateways that send a
+    // finish_reason but no [DONE] sentinel.
     for event in parser.finish(&mut state) {
         state.diagnostics_mut().observe_event(&event);
+        if matches!(event, LlmEvent::Done { .. }) {
+            emitted_done = true;
+        }
         if tx.send(event).await.is_err() {
             state.emit_diagnostics(StreamTermination::ConsumerDropped, started_at.elapsed());
             return StreamOutcome::Ok;
         }
     }
 
-    state.emit_diagnostics(StreamTermination::Eof, started_at.elapsed());
-    StreamOutcome::Ok
+    if emitted_done {
+        state.emit_diagnostics(StreamTermination::Eof, started_at.elapsed());
+        return StreamOutcome::Ok;
+    }
+
+    // EOF without any terminal signal: the stream was cut off. Fail it so the
+    // runner can retry (empty) or surface an error (partial) instead of
+    // reporting an empty successful turn.
+    let error = ProviderError::Connection("OpenAI stream ended without a terminal event".to_string());
+    state.emit_diagnostics(StreamTermination::EofWithoutTerminal, started_at.elapsed());
+    if emitted_content {
+        StreamOutcome::FailedPartial(error)
+    } else {
+        StreamOutcome::FailedEmpty(error)
+    }
 }
 
 pub(crate) async fn process_anthropic_sse_stream(

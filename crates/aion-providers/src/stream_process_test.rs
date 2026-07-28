@@ -143,7 +143,13 @@ mod tests {
         let summary = provider_stream_summary(&writer);
 
         assert!(matches!(outcome, StreamOutcome::Ok));
-        assert_eq!(events.len(), 1);
+        // The deferred Done is flushed at EOF, so the turn terminates cleanly
+        // with the usage from the finish_reason chunk.
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[1],
+            LlmEvent::Done { stop_reason: StopReason::EndTurn, usage } if usage.input_tokens == 12
+        ));
         assert_eq!(summary["level"], "WARN");
         assert_eq!(summary["fields"]["termination"], "eof");
         assert_eq!(summary["fields"]["done_seen"], false);
@@ -151,6 +157,98 @@ mod tests {
         assert_eq!(summary["fields"]["empty_answer"], false);
         assert_eq!(summary["fields"]["malformed_json"], false);
         assert_eq!(summary["fields"]["unexpected_finish_reason"], false);
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_without_terminal_event_fails_empty() {
+        let content = json!({
+            "choices": [{
+                "delta": {},
+                "finish_reason": null
+            }]
+        });
+        let response = mock_response(format!("data: {content}\n\n").into_bytes()).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_openai_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert!(events.is_empty());
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedEmpty(ProviderError::Connection(message))
+                if message.contains("without a terminal event")
+        ));
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_cut_off_after_content_fails_partial() {
+        let content = json!({
+            "choices": [{
+                "delta": {"content": "Hel"},
+                "finish_reason": null
+            }]
+        });
+        let response = mock_response(format!("data: {content}\n\n").into_bytes()).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_openai_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], LlmEvent::TextDelta(text) if text == "Hel"));
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedPartial(ProviderError::Connection(message))
+                if message.contains("without a terminal event")
+        ));
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_embedded_error_frame_fails_empty() {
+        let error = json!({
+            "error": {"code": 500, "message": "upstream exploded"}
+        });
+        let response = mock_response(format!("data: {error}\n\ndata: [DONE]\n\n").into_bytes()).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_openai_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert!(events.is_empty());
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedEmpty(ProviderError::Api { status: 500, message })
+                if message == "upstream exploded"
+        ));
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_embedded_error_after_content_fails_partial() {
+        let content = json!({
+            "choices": [{
+                "delta": {"content": "Hel"},
+                "finish_reason": null
+            }]
+        });
+        let error = json!({
+            "error": {"code": 500, "message": "upstream exploded"}
+        });
+        let response = mock_response(format!("data: {content}\n\ndata: {error}\n\n").into_bytes()).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_openai_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedPartial(ProviderError::Api { status: 500, .. })
+        ));
     }
 
     #[tokio::test]
