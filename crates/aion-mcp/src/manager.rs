@@ -365,6 +365,32 @@ impl McpManager {
             next_id: AtomicU64::new(10),
         }
     }
+
+    /// Test-only constructor: like [`Self::new_for_test`], but each server's
+    /// tool list is pre-populated instead of starting empty. Used by tests
+    /// that exercise tool-registration logic (e.g. schema-compatibility
+    /// filtering) without a live handshake.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_test_with_tools(
+        entries: Vec<(&str, bool, Vec<McpToolDef>, Box<dyn super::transport::McpTransport>)>,
+    ) -> Self {
+        let mut servers = HashMap::new();
+        for (name, supports_resources, tools, transport) in entries {
+            servers.insert(
+                name.to_string(),
+                McpServer {
+                    name: name.to_string(),
+                    transport,
+                    tools,
+                    supports_resources,
+                },
+            );
+        }
+        Self {
+            servers,
+            next_id: AtomicU64::new(10),
+        }
+    }
 }
 
 #[cfg(test)]

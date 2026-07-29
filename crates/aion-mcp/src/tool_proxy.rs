@@ -99,6 +99,65 @@ impl Tool for McpToolProxy {
     }
 }
 
+/// Whether a tool's `inputSchema` uses only property keys the LLM provider
+/// APIs accept (`^[a-zA-Z0-9_.-]{1,64}$`, matching Anthropic's Messages API
+/// rule — the strictest of the providers this app talks to). A single
+/// non-conforming tool would otherwise take down every tool call in the
+/// session, so a bad tool must be dropped individually rather than losing
+/// the whole server.
+///
+/// Real-world case that motivated this: a financial-data MCP server (ftshare)
+/// declared a parameterless tool as `properties: { "（无业务参数）": {...} }`
+/// — a human-readable placeholder where an empty object belongs. Walks the
+/// composition keywords a real MCP server is likely to emit (`properties`,
+/// `items`, `anyOf`/`oneOf`/`allOf`, `$defs`/`definitions`) since the
+/// provider validates the fully-resolved schema, not just its top level.
+fn has_valid_property_keys(schema: &Value) -> bool {
+    let Some(obj) = schema.as_object() else {
+        return true;
+    };
+
+    if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+        for key in props.keys() {
+            if key.is_empty()
+                || key.len() > 64
+                || !key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+            {
+                return false;
+            }
+        }
+        if props.values().any(|child| !has_valid_property_keys(child)) {
+            return false;
+        }
+    }
+
+    if let Some(items) = obj.get("items")
+        && !has_valid_property_keys(items)
+    {
+        return false;
+    }
+
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        if let Some(branches) = obj.get(keyword).and_then(Value::as_array)
+            && branches.iter().any(|branch| !has_valid_property_keys(branch))
+        {
+            return false;
+        }
+    }
+
+    for keyword in ["$defs", "definitions"] {
+        if let Some(defs) = obj.get(keyword).and_then(Value::as_object)
+            && defs.values().any(|def| !has_valid_property_keys(def))
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Register all MCP tools into the tool registry, handling name collisions.
 ///
 /// Strategy:
@@ -107,6 +166,10 @@ impl Tool for McpToolProxy {
 ///
 /// Each tool's deferred flag is read from the server's config:
 /// `McpServerConfig::deferred` — defaults to `true` when absent.
+///
+/// Tools whose schema the provider API would reject are skipped individually
+/// (see [`has_valid_property_keys`]) so one malformed tool doesn't cost the
+/// server's other tools.
 pub fn register_mcp_tools(
     registry: &mut aion_tools::registry::ToolRegistry,
     manager: &Arc<McpManager>,
@@ -118,6 +181,16 @@ pub fn register_mcp_tools(
     // Determine which names need prefixing
     for (server_name, tool_def) in &all_tools {
         let original_name = &tool_def.name;
+
+        if !has_valid_property_keys(&tool_def.input_schema) {
+            tracing::warn!(
+                target: "aion_mcp",
+                server = %server_name,
+                tool = %original_name,
+                "mcp tool schema has a property key the provider API would reject; skipping this tool only"
+            );
+            continue;
+        }
 
         // Check collision with built-in tools
         let collides_builtin = builtin_names.iter().any(|n| n == original_name);
@@ -165,6 +238,17 @@ pub fn register_single_server_tools(
 
     for (_, tool_def) in &server_tools {
         let original_name = &tool_def.name;
+
+        if !has_valid_property_keys(&tool_def.input_schema) {
+            tracing::warn!(
+                target: "aion_mcp",
+                server = %server_name,
+                tool = %original_name,
+                "mcp tool schema has a property key the provider API would reject; skipping this tool only"
+            );
+            continue;
+        }
+
         let collides_builtin = builtin_names.iter().any(|n| n == original_name);
         let cross_server_collision = manager.tool_name_count(original_name) > 1;
 
