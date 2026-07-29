@@ -472,32 +472,91 @@ async fn empty_final_gets_one_visible_answer_nudge() {
 
     assert_eq!(result.text, "Visible answer");
     assert_eq!(result.stop_reason, StopReason::EndTurn);
-    assert_eq!(result.turns, 1);
+    // The nudge retry runs as a counted normal turn.
+    assert_eq!(result.turns, 2);
 
     let recorded = requests.lock().unwrap();
     assert_eq!(recorded.len(), 2);
-    assert_eq!(recorded[1].tool_count, 0);
+    // The first retry keeps tools available so a model that hid its tool
+    // call in reasoning can re-issue it properly.
+    assert_eq!(recorded[1].tool_count, 1);
     assert!(
         !contains_empty_assistant_message(&recorded[1].messages),
-        "empty finalization request must not include empty assistant content"
+        "empty-final retry request must not include empty assistant content"
     );
     let last_message = recorded[1]
         .messages
         .last()
-        .expect("finalization request should include control prompt");
+        .expect("retry request should include the corrective prompt");
     assert_eq!(last_message.role, Role::User);
     assert!(
         matches!(
             &last_message.content[..],
             [ContentBlock::Text { text }] if text.contains("visible answer text")
         ),
-        "empty finalization prompt should ask for visible answer text"
+        "empty-final retry prompt should ask for visible answer text"
+    );
+}
+
+#[tokio::test]
+async fn empty_final_retry_can_recover_through_a_tool_call() {
+    // Reproduces the reasoning-only turn: the model "answers" with thinking
+    // content only (e.g. a tool call written into reasoning), then uses the
+    // tool-enabled retry to issue the real tool call and finish the task.
+    let provider = Arc::new(FullRecordingRequestProvider::new(vec![
+        vec![
+            LlmEvent::ThinkingDelta("{\"tool\":\"mock_tool\"}".to_string()),
+            LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            },
+        ],
+        vec![
+            LlmEvent::ToolUse {
+                id: "call-1".to_string(),
+                name: "mock_tool".to_string(),
+                input: json!({}),
+                extra: None,
+            },
+            LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            },
+        ],
+        vec![
+            LlmEvent::TextDelta("Recovered answer".to_string()),
+            LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            },
+        ],
+    ]));
+    let requests = provider.requests();
+
+    let config = test_config();
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new("mock_tool", "tool output", false)));
+    let output = silent_output();
+
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
+    let result = engine.run("Do the task", "").await.expect("engine should succeed");
+
+    assert_eq!(result.text, "Recovered answer");
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 3);
+    assert_eq!(
+        recorded[1].tool_count, 1,
+        "retry after the reasoning-only turn must keep tools available"
     );
 }
 
 #[tokio::test]
 async fn empty_final_falls_back_after_one_empty_retry() {
     let dir = tempdir().expect("tempdir should be created");
+    // Empty normal turn, empty tool-enabled retry, then an empty tool-less
+    // finalization turn — the run must still fall back to visible text.
     let provider = Arc::new(FullRecordingRequestProvider::new(vec![
         vec![LlmEvent::Done {
             stop_reason: StopReason::EndTurn,
@@ -507,7 +566,12 @@ async fn empty_final_falls_back_after_one_empty_retry() {
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }],
+        vec![LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        }],
     ]));
+    let requests = provider.requests();
 
     let mut config = test_config();
     config.session.enabled = true;
@@ -525,8 +589,16 @@ async fn empty_final_falls_back_after_one_empty_retry() {
         .expect("engine should fall back successfully");
 
     assert_eq!(result.stop_reason, StopReason::EndTurn);
-    assert_eq!(result.turns, 1);
+    assert_eq!(result.turns, 2);
     assert!(result.text.contains("finished without visible answer text"));
+
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 3);
+    assert_eq!(
+        recorded[2].tool_count, 0,
+        "final finalization turn after the retry must disable tools"
+    );
+    drop(recorded);
 
     let session = SessionManager::new(dir.path().to_path_buf(), 10)
         .load("latest")
@@ -1021,13 +1093,13 @@ async fn finalization_requests_can_be_asserted_without_tools() {
 }
 
 #[tokio::test]
-async fn repeated_tool_call_failure_turns_stop_before_another_provider_request() {
-    let provider = Arc::new(RecordingRequestProvider::new(vec![
+async fn repeated_tool_call_failure_turns_finalize_without_more_tools() {
+    let provider = Arc::new(FullRecordingRequestProvider::new(vec![
         tool_call_failure_turn("tool-1"),
         tool_call_failure_turn("tool-2"),
         tool_call_failure_turn("tool-3"),
         vec![
-            LlmEvent::TextDelta("should not be requested".to_string()),
+            LlmEvent::TextDelta("The tool is blocked by permission settings.".to_string()),
             LlmEvent::Done {
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
@@ -1043,27 +1115,41 @@ async fn repeated_tool_call_failure_turns_stop_before_another_provider_request()
     registry.register(Box::new(MockTool::new("mock_tool", "permission denied", true)));
 
     let mut engine = AgentEngine::new_with_provider(provider, config, registry, silent_output(), std::env::temp_dir());
-    let err = engine
+    let result = engine
         .run("keep retrying a failing tool", "")
         .await
-        .expect_err("engine should stop repeated tool-call-failure loops");
+        .expect("engine should finalize repeated tool-call-failure loops");
 
-    assert!(
-        err.to_string().contains("consecutive tool-call failures"),
-        "unexpected error: {err}"
-    );
-    assert_eq!(
-        requests.lock().unwrap().len(),
-        3,
-        "fourth provider request must not be sent"
-    );
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(result.text, "The tool is blocked by permission settings.");
+    assert_eq!(result.turns, 3);
+
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 4);
+    assert!(recorded[..3].iter().all(|request| request.tool_count > 0));
+    assert_eq!(recorded[3].tool_count, 0);
+    assert!(recorded[3].messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult { content, is_error: true, .. }
+                    if content.contains("permission denied")
+            )
+        })
+    }));
 }
 
 #[tokio::test]
-async fn repeated_tool_call_failure_threshold_one_stops_immediately() {
-    let provider = Arc::new(RecordingRequestProvider::new(vec![
+async fn repeated_tool_call_failure_threshold_one_finalizes_immediately() {
+    let provider = Arc::new(FullRecordingRequestProvider::new(vec![
         tool_call_failure_turn("tool-1"),
-        tool_call_failure_turn("tool-2"),
+        vec![
+            LlmEvent::TextDelta("The tool failed because permission was denied.".to_string()),
+            LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            },
+        ],
     ]));
     let requests = provider.requests();
 
@@ -1075,13 +1161,19 @@ async fn repeated_tool_call_failure_threshold_one_stops_immediately() {
     registry.register(Box::new(MockTool::new("mock_tool", "permission denied", true)));
 
     let mut engine = AgentEngine::new_with_provider(provider, config, registry, silent_output(), std::env::temp_dir());
-    let err = engine
+    let result = engine
         .run("keep retrying a failing tool", "")
         .await
-        .expect_err("engine should stop repeated tool-call-failure loops");
+        .expect("engine should finalize repeated tool-call-failure loops");
 
-    assert!(matches!(err, AgentError::ToolCallFailures { count: 1, limit: 1 }));
-    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(result.text, "The tool failed because permission was denied.");
+    assert_eq!(result.turns, 1);
+
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 2);
+    assert!(recorded[0].tool_count > 0);
+    assert_eq!(recorded[1].tool_count, 0);
 }
 
 #[tokio::test]

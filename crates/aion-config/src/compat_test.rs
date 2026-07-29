@@ -662,4 +662,33 @@ strip_patterns = ["__REASONING__"]
         assert_eq!(compat.messages.strip_patterns, Some(vec!["__REASONING__".to_string()]));
         assert!(compat.tools.clean_orphan_tool_calls.is_none());
     }
+
+    #[test]
+    fn test_openai_official_defaults_use_max_completion_tokens() {
+        let compat = ProviderCompat::openai_official_defaults();
+        assert_eq!(compat.max_tokens_field(), "max_completion_tokens");
+
+        // Everything except the max-tokens field matches the generic preset.
+        let generic = ProviderCompat::openai_defaults();
+        assert_eq!(compat.transport.api_path, generic.transport.api_path);
+        assert_eq!(compat.transport.openai_api_mode, generic.transport.openai_api_mode);
+        assert_eq!(
+            compat.messages.merge_assistant_messages,
+            generic.messages.merge_assistant_messages
+        );
+        assert_eq!(compat.reasoning.supports_effort, generic.reasoning.supports_effort);
+    }
+
+    #[test]
+    fn test_user_override_beats_openai_official_defaults() {
+        let user = ProviderCompat {
+            transport: TransportCompat {
+                max_tokens_field: Some("max_tokens".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = ProviderCompat::merge(ProviderCompat::openai_official_defaults(), user);
+        assert_eq!(merged.max_tokens_field(), "max_tokens");
+    }
 }

@@ -70,6 +70,8 @@ mod tests_set_config {
             protocol_writer: None,
             compact_config: aion_config::compact::CompactConfig::default(),
             compact_state: super::CompactState::new(),
+            context_state: Default::default(),
+            prompt_usage: Default::default(),
             compact_level: CompactLevel::default(),
             toon_enabled: false,
             plan_state: Default::default(),
@@ -445,6 +447,8 @@ mod tests_phase6 {
             protocol_writer: None,
             compact_config: aion_config::compact::CompactConfig::default(),
             compact_state: super::CompactState::new(),
+            context_state: Default::default(),
+            prompt_usage: Default::default(),
             compact_level: CompactLevel::default(),
             toon_enabled: false,
             plan_state: Default::default(),
@@ -579,20 +583,28 @@ mod tests_phase6 {
 
 #[cfg(test)]
 mod tests_compact {
+    use std::env;
     use std::sync::{Arc, Mutex};
 
     use aion_config::compact::CompactConfig;
+    use aion_config::config::{CliArgs, Config};
     use aion_providers::error::ProviderError;
     use aion_providers::provider::LlmProvider;
     use aion_tools::registry::ToolRegistry;
     use aion_types::llm::{LlmEvent, LlmRequest};
-    use aion_types::message::{ContentBlock, ImageInputCapability, ImageUrl, Message, Role, TokenUsage};
+    use aion_types::message::{ContentBlock, ImageInputCapability, ImageUrl, Message, Role, StopReason, TokenUsage};
+    use chrono::Utc;
     use serde_json::json;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
 
     use super::{CompactLevel, ProviderCompat};
+    use crate::compact::auto::should_autocompact;
     use crate::compact::state::CompactState;
     use crate::confirm::ToolConfirmer;
+    use crate::context_usage::{ContextState, ContextUsageSource};
     use crate::output::OutputSink;
+    use crate::session::{Session, SessionManager};
 
     struct NullOutput;
     impl OutputSink for NullOutput {
@@ -642,6 +654,27 @@ mod tests_compact {
     impl LlmProvider for NullProvider {
         async fn stream(&self, _: &LlmRequest) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+    }
+
+    struct SuccessfulProvider {
+        usage: TokenUsage,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for SuccessfulProvider {
+        async fn stream(&self, _: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = mpsc::channel(4);
+            tx.send(LlmEvent::TextDelta("<summary>condensed context</summary>".into()))
+                .await
+                .unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: self.usage.clone(),
+            })
+            .await
+            .unwrap();
             Ok(rx)
         }
     }
@@ -699,6 +732,8 @@ mod tests_compact {
             protocol_writer: None,
             compact_config,
             compact_state,
+            context_state: Default::default(),
+            prompt_usage: Default::default(),
             compact_level: CompactLevel::default(),
             toon_enabled: false,
             plan_state: Default::default(),
@@ -706,6 +741,26 @@ mod tests_compact {
             cache_detector: super::CacheBreakDetector::new(),
             commands: crate::commands::default_registry(),
         }
+    }
+
+    fn test_config() -> Config {
+        Config::resolve(&CliArgs {
+            provider: Some("anthropic".to_string()),
+            api_key: Some("sk-test".to_string()),
+            base_url: None,
+            model: Some("test-model".to_string()),
+            max_tokens: Some(4096),
+            thinking: None,
+            thinking_budget: None,
+            max_turns: None,
+            max_tool_call_malformed_turns: None,
+            max_tool_call_failure_turns: None,
+            system_prompt: None,
+            profile: None,
+            auto_approve: true,
+            project_dir: None,
+        })
+        .unwrap()
     }
 
     fn tool_use_msg(id: &str, name: &str) -> Message {
@@ -782,6 +837,7 @@ mod tests_compact {
             matches!(&last.content[1], ContentBlock::ToolResult { tool_use_id, content, is_error }
                 if tool_use_id == "call_bash" && content == "Tool execution canceled by user" && *is_error)
         );
+        assert_eq!(engine.compact_state.last_input_tokens, 14);
 
         let emitted = output.tool_results.lock().unwrap();
         assert_eq!(emitted.len(), 2);
@@ -842,6 +898,181 @@ mod tests_compact {
         );
     }
 
+    #[test]
+    fn provider_turn_total_replaces_previous_context_estimate() {
+        let mut state = CompactState::new();
+        state.last_input_tokens = 100_000;
+        let mut engine = make_compact_engine(CompactConfig::default(), state, vec![]);
+
+        engine.record_turn_usage(&TokenUsage {
+            input_tokens: 693,
+            output_tokens: 102,
+            cache_read_tokens: 512,
+            ..Default::default()
+        });
+
+        assert_eq!(engine.compact_state.last_input_tokens, 795);
+        assert_eq!(engine.context_state.context_usage, 795);
+        assert_eq!(engine.context_state.source, ContextUsageSource::ProviderExact);
+    }
+
+    #[test]
+    fn missing_provider_usage_does_not_reset_context_to_zero() {
+        let mut engine = make_compact_engine(CompactConfig::default(), CompactState::new(), vec![]);
+        engine.context_state.replace_with_local_estimate(1_234);
+        engine.sync_compact_watermark();
+
+        let has_provider_usage = engine.record_turn_usage(&TokenUsage::default());
+
+        assert!(!has_provider_usage);
+        assert_eq!(engine.context_state.context_usage, 1_234);
+        assert_eq!(engine.compact_state.last_input_tokens, 1_234);
+        assert_eq!(engine.context_state.source, ContextUsageSource::LocalProjected);
+    }
+
+    #[test]
+    fn resume_restores_persisted_context_watermark_and_counts() {
+        let mut context_state = ContextState::default();
+        context_state.replace_with_provider_usage(54_321);
+        context_state.compact_count = 2;
+        context_state.microcompact_count = 5;
+        let session = Session {
+            id: "resume-context".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            provider: "anthropic".into(),
+            model: "test-model".into(),
+            cwd: "/tmp".into(),
+            total_usage: TokenUsage::default(),
+            context_state,
+            messages: Vec::new(),
+        };
+        let provider: Arc<dyn LlmProvider> = Arc::new(NullProvider);
+
+        let engine = super::AgentEngine::resume_with_provider(
+            provider,
+            test_config(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            session,
+            env::temp_dir(),
+        );
+        let status = engine.context_status();
+
+        assert_eq!(status.context_usage, 54_321);
+        assert_eq!(status.compact_count, 2);
+        assert_eq!(status.microcompact_count, 5);
+        assert_eq!(status.source, ContextUsageSource::ProviderExact);
+        assert_eq!(engine.compact_state.last_input_tokens, 54_321);
+    }
+
+    #[tokio::test]
+    async fn user_message_and_local_projection_are_saved_before_provider_failure() {
+        let directory = tempdir().unwrap();
+        let mut config = test_config();
+        config.session.enabled = true;
+        config.session.directory = directory.path().display().to_string();
+        let provider: Arc<dyn LlmProvider> = Arc::new(RecordingRejectingProvider::default());
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            directory.path().to_path_buf(),
+        );
+        engine
+            .init_session(
+                "anthropic",
+                &directory.path().display().to_string(),
+                Some("saved-before-call"),
+            )
+            .unwrap();
+
+        assert!(engine.run("hello before failure", "msg-1").await.is_err());
+
+        let manager = SessionManager::new(directory.path().to_path_buf(), 10);
+        let loaded = manager.load("saved-before-call").unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert!(loaded.context_state.context_usage > 0);
+        assert_eq!(loaded.context_state.source, ContextUsageSource::LocalProjected);
+    }
+
+    #[tokio::test]
+    async fn assistant_response_saves_exact_provider_context_usage() {
+        let directory = tempdir().unwrap();
+        let mut config = test_config();
+        config.session.enabled = true;
+        config.session.directory = directory.path().display().to_string();
+        let provider: Arc<dyn LlmProvider> = Arc::new(SuccessfulProvider {
+            usage: TokenUsage {
+                input_tokens: 100,
+                output_tokens: 20,
+                ..Default::default()
+            },
+        });
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            directory.path().to_path_buf(),
+        );
+        engine
+            .init_session(
+                "anthropic",
+                &directory.path().display().to_string(),
+                Some("saved-after-response"),
+            )
+            .unwrap();
+
+        engine.run("hello", "msg-2").await.unwrap();
+
+        let manager = SessionManager::new(directory.path().to_path_buf(), 10);
+        let loaded = manager.load("saved-after-response").unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.context_state.context_usage, 120);
+        assert_eq!(loaded.context_state.source, ContextUsageSource::ProviderExact);
+    }
+
+    #[test]
+    fn all_tool_results_are_added_before_the_next_threshold_check() {
+        let config = CompactConfig {
+            context_window: 1_000,
+            autocompact_threshold_pct: Some(60),
+            ..Default::default()
+        };
+        let mut engine = make_compact_engine(config, CompactState::new(), vec![]);
+        engine.record_turn_usage(&TokenUsage {
+            input_tokens: 500,
+            output_tokens: 50,
+            ..Default::default()
+        });
+        assert!(!should_autocompact(
+            engine.compact_state.last_input_tokens,
+            &engine.compact_config
+        ));
+
+        let tool_results = vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "call-1".into(),
+                content: "a".repeat(200),
+                is_error: false,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "call-2".into(),
+                content: "b".repeat(200),
+                is_error: false,
+            },
+        ];
+        engine.record_tool_context_estimate(&tool_results, &[]);
+
+        assert_eq!(engine.compact_state.last_input_tokens, 650);
+        assert!(should_autocompact(
+            engine.compact_state.last_input_tokens,
+            &engine.compact_config
+        ));
+    }
+
     // -- Emergency check fires when at limit --
 
     #[tokio::test]
@@ -897,6 +1128,8 @@ mod tests_compact {
         let state = CompactState::new();
 
         let mut engine = make_compact_engine(config, state, messages);
+        engine.context_state.replace_with_provider_usage(1_000);
+        engine.sync_compact_watermark();
         engine.run_compaction().await.unwrap();
 
         // Last 3 tool results should be preserved
@@ -908,6 +1141,94 @@ mod tests_compact {
             .count();
 
         assert_eq!(cleared_count, 9);
+        assert_eq!(engine.context_state.microcompact_count, 1);
+        assert_eq!(engine.context_state.context_usage, 1_000);
+        assert_eq!(engine.compact_state.last_input_tokens, 1_000);
+        assert_eq!(engine.context_state.source, ContextUsageSource::LocalProjected);
+    }
+
+    #[tokio::test]
+    async fn microcompact_does_not_lower_the_emergency_watermark() {
+        let mut messages = Vec::new();
+        for i in 0..3 {
+            let id = format!("t{i}");
+            messages.push(tool_use_msg(&id, "Read"));
+            messages.push(tool_result_msg(&id, &"x".repeat(4_000)));
+        }
+
+        let config = CompactConfig {
+            context_window: 200_000,
+            emergency_buffer: 3_000,
+            max_failures: 3,
+            micro_keep_recent: 1,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 198_000;
+        state.consecutive_failures = 3;
+
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.context_state.replace_with_provider_usage(198_000);
+        engine.sync_compact_watermark();
+
+        let result = engine.run_compaction().await;
+
+        assert!(matches!(
+            result,
+            Err(super::AgentError::ContextTooLong {
+                input_tokens: 198_000,
+                limit: 197_000
+            })
+        ));
+        let cleared_count = engine
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { content, .. } if content == "[Tool result cleared]"
+                )
+            })
+            .count();
+        assert_eq!(cleared_count, 2);
+        assert_eq!(engine.context_state.microcompact_count, 1);
+        assert_eq!(engine.context_state.context_usage, 198_000);
+        assert_eq!(engine.compact_state.last_input_tokens, 198_000);
+        assert_eq!(engine.context_state.source, ContextUsageSource::LocalProjected);
+    }
+
+    #[tokio::test]
+    async fn successful_autocompact_updates_persisted_count_and_local_estimate() {
+        let config = CompactConfig {
+            context_window: 100,
+            autocompact_threshold_pct: Some(50),
+            emergency_buffer: 10,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 60;
+        let messages = vec![
+            Message::new(Role::User, vec![ContentBlock::Text { text: "first".into() }]),
+            Message::new(Role::Assistant, vec![ContentBlock::Text { text: "second".into() }]),
+            Message::new(Role::User, vec![ContentBlock::Text { text: "third".into() }]),
+        ];
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(SuccessfulProvider {
+            usage: TokenUsage::default(),
+        });
+        engine.context_state.replace_with_provider_usage(60);
+        engine.sync_compact_watermark();
+
+        engine.run_compaction().await.unwrap();
+
+        assert_eq!(engine.context_state.compact_count, 1);
+        assert_eq!(engine.context_state.source, ContextUsageSource::LocalProjected);
+        assert_eq!(engine.messages.len(), 2);
+        assert_eq!(
+            engine.compact_state.last_input_tokens,
+            engine.context_state.context_usage
+        );
     }
 
     // -- Disabled config skips micro and auto but not emergency --
@@ -967,7 +1288,7 @@ mod tests_compact {
     #[tokio::test]
     async fn first_turn_zero_tokens_no_compaction() {
         let config = CompactConfig::default();
-        let state = CompactState::new(); // last_input_tokens = 0
+        let state = CompactState::new(); // context_tokens = 0
 
         let mut engine = make_compact_engine(config, state, vec![]);
         assert!(engine.run_compaction().await.is_ok());
@@ -1113,6 +1434,8 @@ mod tests_plan_mode {
             protocol_writer: None,
             compact_config: aion_config::compact::CompactConfig::default(),
             compact_state: CompactState::new(),
+            context_state: Default::default(),
+            prompt_usage: Default::default(),
             compact_level: CompactLevel::default(),
             toon_enabled: false,
             plan_state: PlanState::default(),
@@ -1260,14 +1583,20 @@ mod tests_plan_mode {
 
 #[cfg(test)]
 mod tests_handle_command {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use aion_config::compact::CompactConfig;
+    use aion_protocol::events::ToolCategory;
     use aion_providers::error::ProviderError;
     use aion_providers::provider::LlmProvider;
+    use aion_tools::Tool;
     use aion_tools::registry::ToolRegistry;
     use aion_types::llm::{LlmEvent, LlmRequest};
     use aion_types::message::{ContentBlock, ImageInputCapability, ImageUrl, Message, Role, StopReason, TokenUsage};
+    use aion_types::tool::ToolResult;
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
     use tokio::sync::mpsc::{Receiver, channel};
 
     use super::{AgentEngine, AgentError, CacheBreakDetector, CompactLevel, ProviderCompat};
@@ -1325,6 +1654,8 @@ mod tests_handle_command {
             protocol_writer: None,
             compact_config: CompactConfig::default(),
             compact_state: CompactState::new(),
+            context_state: Default::default(),
+            prompt_usage: Default::default(),
             compact_level: CompactLevel::default(),
             toon_enabled: false,
             plan_state: Default::default(),
@@ -1374,6 +1705,23 @@ mod tests_handle_command {
     }
 
     #[tokio::test]
+    async fn handle_context_command_is_read_only() {
+        let mut engine = make_engine();
+        engine.context_state.context_usage = 42_000;
+        let before = engine.context_state.clone();
+
+        let result = engine
+            .handle_command("/context all")
+            .await
+            .unwrap()
+            .expect("context command should be handled");
+
+        assert_eq!(result.turns, 0);
+        assert_eq!(engine.context_state, before);
+        assert!(engine.messages.is_empty());
+    }
+
+    #[tokio::test]
     async fn handle_command_with_args() {
         let mut engine = make_engine();
         let result = engine
@@ -1406,14 +1754,32 @@ mod tests_handle_command {
         assert!(matches!(err, AgentError::UserAborted));
     }
 
+    #[tokio::test]
+    async fn run_with_blocks_intercepts_single_text_context_command() {
+        let mut engine = make_engine();
+        let result = engine
+            .run_with_blocks(
+                vec![ContentBlock::Text {
+                    text: "/context".into(),
+                }],
+                "msg-context",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.turns, 0);
+        assert!(engine.messages.is_empty());
+    }
+
     #[test]
     fn slash_command_list_returns_all() {
         let engine = make_engine();
         let list = engine.slash_command_list();
-        assert!(list.len() >= 4);
+        assert!(list.len() >= 5);
         let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"help"));
         assert!(names.contains(&"compact"));
+        assert!(names.contains(&"context"));
         assert!(names.contains(&"clear"));
         assert!(names.contains(&"quit"));
     }
@@ -1421,7 +1787,7 @@ mod tests_handle_command {
     // --- run() text-only behavior ---
 
     struct SingleResponseProvider;
-    #[async_trait::async_trait]
+    #[async_trait]
     impl LlmProvider for SingleResponseProvider {
         async fn stream(&self, _: &LlmRequest) -> Result<Receiver<LlmEvent>, ProviderError> {
             let (tx, rx) = channel(2);
@@ -1433,6 +1799,134 @@ mod tests_handle_command {
                 })
                 .await;
             Ok(rx)
+        }
+    }
+
+    #[derive(Default)]
+    struct RetryingToolProvider {
+        requests: Mutex<Vec<LlmRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RetryingToolProvider {
+        async fn stream(&self, request: &LlmRequest) -> Result<Receiver<LlmEvent>, ProviderError> {
+            let request_index = {
+                let mut requests = self.requests.lock().unwrap();
+                let request_index = requests.len();
+                requests.push(request.clone());
+                request_index
+            };
+            let (tx, rx) = channel(5);
+
+            if request_index < 3 {
+                let _ = tx.send(LlmEvent::TextDelta("I will retry".to_string())).await;
+                let _ = tx
+                    .send(LlmEvent::ToolUse {
+                        id: format!("failed-call-{request_index}"),
+                        name: "FailingTool".to_string(),
+                        input: json!({ "resource": "same" }),
+                        extra: None,
+                    })
+                    .await;
+                let _ = tx
+                    .send(LlmEvent::ToolUse {
+                        id: format!("successful-call-{request_index}"),
+                        name: "SuccessfulTool".to_string(),
+                        input: json!({ "resource": request_index }),
+                        extra: None,
+                    })
+                    .await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::ToolUse,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            } else {
+                let _ = tx
+                    .send(LlmEvent::TextDelta(
+                        "The tool is blocked; please resolve its error before retrying.".to_string(),
+                    ))
+                    .await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            }
+
+            Ok(rx)
+        }
+    }
+
+    struct FailingTool {
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for FailingTool {
+        fn name(&self) -> &str {
+            "FailingTool"
+        }
+
+        fn description(&self) -> &str {
+            "always fails for loop-guard testing"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({ "type": "object" })
+        }
+
+        fn is_concurrency_safe(&self, _: &Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _: Value) -> ToolResult {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            ToolResult {
+                content: "resource remains unavailable".to_string(),
+                is_error: true,
+            }
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+    }
+
+    struct SuccessfulTool {
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for SuccessfulTool {
+        fn name(&self) -> &str {
+            "SuccessfulTool"
+        }
+
+        fn description(&self) -> &str {
+            "always succeeds for loop-guard testing"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({ "type": "object" })
+        }
+
+        fn is_concurrency_safe(&self, _: &Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _: Value) -> ToolResult {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            ToolResult {
+                content: "progress recorded".to_string(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
         }
     }
 
@@ -1459,6 +1953,52 @@ mod tests_handle_command {
             ContentBlock::Text { text } => assert_eq!(text, input),
             _ => panic!("expected plain text block, got {:?}", user_msg.content[0]),
         }
+    }
+
+    #[tokio::test]
+    async fn visible_retry_text_and_successful_tools_do_not_reset_repeated_failure() {
+        let provider = Arc::new(RetryingToolProvider::default());
+        let failed_executions = Arc::new(AtomicUsize::new(0));
+        let successful_executions = Arc::new(AtomicUsize::new(0));
+        let mut engine = make_engine_with_provider(provider.clone());
+        engine.max_turns_per_run = Some(10);
+        engine.tools.register(Box::new(FailingTool {
+            executions: failed_executions.clone(),
+        }));
+        engine.tools.register(Box::new(SuccessfulTool {
+            executions: successful_executions.clone(),
+        }));
+
+        let result = engine.run("finish the task", "msg-tool-loop").await.unwrap();
+
+        assert_eq!(failed_executions.load(Ordering::SeqCst), 3);
+        assert_eq!(successful_executions.load(Ordering::SeqCst), 3);
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(result.turns, 3);
+        assert!(result.text.contains("tool is blocked"));
+
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[..3].iter().all(|request| !request.tools.is_empty()));
+        assert!(requests[3].tools.is_empty());
+        assert!(requests[2].messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { content, is_error: true, .. }
+                        if content.contains("same tool call has failed 2/3 times")
+                )
+            })
+        }));
+        assert!(requests[3].messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { content, is_error: true, .. }
+                        if content.contains("resource remains unavailable")
+                )
+            })
+        }));
     }
 
     #[tokio::test]
@@ -1607,10 +2147,10 @@ mod tests_loop_helpers {
     use super::{AgentError, build_assistant_content, merge_tool_results, tool_call_malformed_fingerprint};
     use crate::stream::StreamOutcome;
     use crate::tool_call::{
-        DEFAULT_MAX_TOOL_CALL_FAILURE, ToolCallFailureFingerprint, ToolCallMalformedReason,
-        tool_call_failure_fingerprint,
+        DEFAULT_MAX_ALL_ERROR_TOOL_ROUNDS, DEFAULT_MAX_TOOL_CALL_FAILURE, ToolCallFailureFingerprint,
+        ToolCallMalformedReason, tool_call_failure_fingerprint,
     };
-    use crate::turn::{FinalizationReason, TurnGuardAction, TurnGuards, TurnKind, TurnOutcome};
+    use crate::turn::{FinalizationReason, ToolLoopWarning, TurnGuardAction, TurnGuards, TurnKind, TurnOutcome};
 
     fn tool_use(id: &str, name: &str) -> ContentBlock {
         tool_use_with_input(id, name, json!({}))
@@ -1729,19 +2269,19 @@ mod tests_loop_helpers {
     }
 
     #[test]
-    fn after_tool_round_trips_consecutive_tool_call_failure_breaker() {
+    fn after_tool_round_warns_then_finalizes_repeated_exact_failure() {
         let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
-        // First N-1 tool-call-failure rounds: no stop yet.
-        for _ in 0..DEFAULT_MAX_TOOL_CALL_FAILURE - 1 {
-            assert!(matches!(
-                guards.after_tool_round(None, failed_exec_fingerprint()),
-                TurnGuardAction::Continue
-            ));
-        }
-        // The Nth consecutive tool-call-failure round trips the breaker.
         assert!(matches!(
-            guards.after_tool_round(None, failed_exec_fingerprint()),
-            TurnGuardAction::Stop(AgentError::ToolCallFailures { .. })
+            guards.after_tool_round(None, failed_exec_fingerprint(), true),
+            TurnGuardAction::Continue
+        ));
+        assert!(matches!(
+            guards.after_tool_round(None, failed_exec_fingerprint(), true),
+            TurnGuardAction::Warn(ToolLoopWarning::ExactFailure { count: 2, limit: 3 })
+        ));
+        assert!(matches!(
+            guards.after_tool_round(None, failed_exec_fingerprint(), true),
+            TurnGuardAction::Finalize(FinalizationReason::ToolFailure)
         ));
     }
 
@@ -1749,24 +2289,46 @@ mod tests_loop_helpers {
     fn after_tool_round_resets_tool_call_failure_streak_on_success() {
         let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
         assert!(matches!(
-            guards.after_tool_round(None, failed_exec_fingerprint()),
+            guards.after_tool_round(None, failed_exec_fingerprint(), true),
             TurnGuardAction::Continue
         ));
         // A non-error tool round resets the streak.
-        assert!(matches!(guards.after_tool_round(None, None), TurnGuardAction::Continue));
+        assert!(matches!(
+            guards.after_tool_round(None, None, false),
+            TurnGuardAction::Continue
+        ));
         assert_eq!(guards.tool_call_failure_count(), 0);
+        assert_eq!(guards.all_error_tool_round_count(), 0);
         // So a single subsequent tool-call-failure round must not trip the breaker.
         assert!(matches!(
-            guards.after_tool_round(None, failed_exec_fingerprint()),
+            guards.after_tool_round(None, failed_exec_fingerprint(), true),
             TurnGuardAction::Continue
         ));
     }
 
     #[test]
-    fn after_tool_round_does_not_trip_failure_breaker_for_different_tool_inputs() {
+    fn after_tool_round_tracks_repeated_failure_across_mixed_success_rounds() {
         let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
 
-        for index in 0..DEFAULT_MAX_TOOL_CALL_FAILURE {
+        assert!(matches!(
+            guards.after_tool_round(None, failed_exec_fingerprint(), false),
+            TurnGuardAction::Continue
+        ));
+        assert!(matches!(
+            guards.after_tool_round(None, failed_exec_fingerprint(), false),
+            TurnGuardAction::Warn(ToolLoopWarning::ExactFailure { count: 2, limit: 3 })
+        ));
+        assert!(matches!(
+            guards.after_tool_round(None, failed_exec_fingerprint(), false),
+            TurnGuardAction::Finalize(FinalizationReason::ToolFailure)
+        ));
+    }
+
+    #[test]
+    fn after_tool_round_does_not_trip_exact_breaker_for_different_tool_inputs() {
+        let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
+
+        for index in 0..2 {
             let fingerprint = tool_call_failure_fingerprint(&[tool_use_with_input(
                 &format!("call-{index}"),
                 "ExecCommand",
@@ -1774,7 +2336,7 @@ mod tests_loop_helpers {
             )]);
 
             assert!(matches!(
-                guards.after_tool_round(None, fingerprint),
+                guards.after_tool_round(None, fingerprint, true),
                 TurnGuardAction::Continue
             ));
             assert_eq!(guards.tool_call_failure_count(), 1);
@@ -1782,10 +2344,86 @@ mod tests_loop_helpers {
     }
 
     #[test]
+    fn after_tool_round_warns_then_finalizes_variable_all_error_rounds() {
+        let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
+
+        for index in 1..=DEFAULT_MAX_ALL_ERROR_TOOL_ROUNDS {
+            let fingerprint = tool_call_failure_fingerprint(&[tool_use_with_input(
+                &format!("call-{index}"),
+                "ExecCommand",
+                json!({ "cmd": format!("unique-command-{index}") }),
+            )]);
+            let action = guards.after_tool_round(None, fingerprint, true);
+
+            match index {
+                3 => assert!(matches!(
+                    action,
+                    TurnGuardAction::Warn(ToolLoopWarning::AllErrorRounds { count: 3, limit: 8 })
+                )),
+                DEFAULT_MAX_ALL_ERROR_TOOL_ROUNDS => assert!(matches!(
+                    action,
+                    TurnGuardAction::Finalize(FinalizationReason::ToolFailure)
+                )),
+                _ => assert!(matches!(action, TurnGuardAction::Continue)),
+            }
+        }
+    }
+
+    #[test]
+    fn after_tool_round_warns_then_finalizes_alternating_cycle() {
+        let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
+
+        for index in 0..6 {
+            let variant = index % 2;
+            let fingerprint = tool_call_failure_fingerprint(&[tool_use_with_input(
+                &format!("call-{index}"),
+                "ExecCommand",
+                json!({ "cmd": format!("command-{variant}") }),
+            )]);
+            let action = guards.after_tool_round(None, fingerprint, true);
+
+            match index {
+                2 => assert!(matches!(
+                    action,
+                    TurnGuardAction::Warn(ToolLoopWarning::AllErrorRounds { .. })
+                )),
+                3 => assert!(matches!(
+                    action,
+                    TurnGuardAction::Warn(ToolLoopWarning::Cycle {
+                        period: 2,
+                        repetitions: 2,
+                        limit: 3,
+                    })
+                )),
+                5 => assert!(matches!(
+                    action,
+                    TurnGuardAction::Finalize(FinalizationReason::ToolFailure)
+                )),
+                _ => assert!(matches!(action, TurnGuardAction::Continue)),
+            }
+        }
+    }
+
+    #[test]
+    fn zero_failure_limit_disables_all_tool_failure_guards() {
+        let mut guards = TurnGuards::new(Some(100), 3, 0);
+
+        for _ in 0..20 {
+            assert!(matches!(
+                guards.after_tool_round(None, failed_exec_fingerprint(), true),
+                TurnGuardAction::Continue
+            ));
+        }
+    }
+
+    #[test]
     fn after_tool_round_requests_finalize_when_budget_is_exhausted() {
         let mut guards = TurnGuards::new(Some(1), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
         guards.record_counted_turn();
-        assert!(matches!(guards.after_tool_round(None, None), TurnGuardAction::Finalize));
+        assert!(matches!(
+            guards.after_tool_round(None, None, false),
+            TurnGuardAction::Finalize(FinalizationReason::TurnBudget)
+        ));
     }
 
     #[test]
@@ -1798,7 +2436,7 @@ mod tests_loop_helpers {
         let fingerprint = tool_call_malformed_fingerprint(&calls, &reasons);
 
         assert!(matches!(
-            guards.after_tool_round(fingerprint, None),
+            guards.after_tool_round(fingerprint, None, false),
             TurnGuardAction::Stop(AgentError::ToolCallMalformed { count: 1, limit: 1 })
         ));
     }
@@ -1833,6 +2471,20 @@ mod tests_loop_helpers {
         assert!(prompt.contains("Continue from exactly where it stopped"));
         assert!(prompt.contains("do not repeat"));
         assert!(prompt.contains("Do not call any tools"));
+    }
+
+    #[test]
+    fn turn_kind_tool_failure_prompt_explains_blocker_and_disables_tools() {
+        let kind = TurnKind::Finalization(FinalizationReason::ToolFailure);
+        let prompt = kind
+            .control_prompt()
+            .expect("tool failure finalization must have a prompt");
+
+        assert!(kind.disable_tools());
+        assert_eq!(kind.diagnostic_phase(), "tool_failure_finalization");
+        assert!(prompt.contains("Do not call any more tools"));
+        assert!(prompt.contains("concrete blocker"));
+        assert!(prompt.contains("Do not mention internal retry counters"));
     }
 
     #[test]
@@ -2050,6 +2702,8 @@ mod tests_tool_policy_enforcement {
             protocol_writer: None,
             compact_config: Default::default(),
             compact_state: CompactState::new(),
+            context_state: Default::default(),
+            prompt_usage: Default::default(),
             compact_level: CompactLevel::default(),
             toon_enabled: false,
             plan_state: Default::default(),
@@ -2105,7 +2759,7 @@ mod tests_tool_policy_enforcement {
         let mut engine = make_engine(Arc::clone(&read_executions), Arc::clone(&exec_executions));
         let calls = vec![tool_use("denied", "ExecCommand"), tool_use("allowed", "Read")];
 
-        let output = engine.execute_tool_round(&calls, "").await.unwrap();
+        let output = engine.execute_tool_round(&calls).await.unwrap();
 
         assert_eq!(exec_executions.load(Ordering::SeqCst), 0);
         assert_eq!(read_executions.load(Ordering::SeqCst), 1);
@@ -2117,5 +2771,7 @@ mod tests_tool_policy_enforcement {
             &output.tool_results[1],
             ContentBlock::ToolResult { is_error: false, .. }
         ));
+        assert!(!output.all_tool_results_error);
+        assert!(output.tool_call_failure_fingerprint.is_some());
     }
 }

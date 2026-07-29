@@ -366,6 +366,20 @@ impl ProviderCompat {
         }
     }
 
+    /// Defaults for the official OpenAI API (`api.openai.com`).
+    ///
+    /// Newer official models (o-series, gpt-5 family) reject the legacy
+    /// `max_tokens` parameter and require `max_completion_tokens`, which all
+    /// current official models accept. Third-party OpenAI-compatible
+    /// endpoints often support only `max_tokens`, so plain
+    /// [`openai_defaults`](Self::openai_defaults) keeps the legacy field and
+    /// this preset applies only to the official endpoint.
+    pub fn openai_official_defaults() -> Self {
+        let mut compat = Self::openai_defaults();
+        compat.transport.max_tokens_field = Some("max_completion_tokens".into());
+        compat
+    }
+
     /// Merge user config over defaults (user wins on non-None fields)
     pub fn merge(defaults: Self, user: Self) -> Self {
         Self {

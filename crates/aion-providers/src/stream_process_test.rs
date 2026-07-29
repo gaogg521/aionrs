@@ -142,13 +142,14 @@ mod tests {
         let events = collect_events(rx).await;
         let summary = provider_stream_summary(&writer);
 
-        // finish_reason arrived (so a Done event was staged in pending_done) but the
-        // connection ended before the terminal [DONE] frame — parser.finish() never
-        // flushes pending_done, so without this check the turn would silently report
-        // success. Content was already emitted, so this must surface as FailedPartial
-        // (not FailedEmpty/silent Ok) to match process_openai_responses_sse_stream.
-        assert!(matches!(outcome, StreamOutcome::FailedPartial(_)));
-        assert_eq!(events.len(), 1);
+        assert!(matches!(outcome, StreamOutcome::Ok));
+        // The deferred Done is flushed at EOF, so the turn terminates cleanly
+        // with the usage from the finish_reason chunk.
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[1],
+            LlmEvent::Done { stop_reason: StopReason::EndTurn, usage } if usage.input_tokens == 12
+        ));
         assert_eq!(summary["level"], "WARN");
         assert_eq!(summary["fields"]["termination"], "eof");
         assert_eq!(summary["fields"]["done_seen"], false);
@@ -159,20 +160,120 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_sse_stream_eof_without_any_content_fails_empty() {
-        let body = Vec::new();
-        let response = mock_response(body).await;
+    async fn openai_sse_stream_without_terminal_event_fails_empty() {
+        let content = json!({
+            "choices": [{
+                "delta": {},
+                "finish_reason": null
+            }]
+        });
+        let response = mock_response(format!("data: {content}\n\n").into_bytes()).await;
         let (tx, rx) = mpsc::channel(8);
 
         let outcome = process_openai_sse_stream(response, &tx, false).await;
         drop(tx);
         let events = collect_events(rx).await;
 
-        // No content and no [DONE] at all (e.g. the gateway drops the connection
-        // before anything streams back) must fail empty so stream_runner's retry
-        // path can resend, rather than reporting the turn as cleanly finished.
-        assert!(matches!(outcome, StreamOutcome::FailedEmpty(_)));
         assert!(events.is_empty());
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedEmpty(ProviderError::Connection(message))
+                if message.contains("without a terminal event")
+        ));
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_cut_off_after_content_fails_partial() {
+        let content = json!({
+            "choices": [{
+                "delta": {"content": "Hel"},
+                "finish_reason": null
+            }]
+        });
+        let response = mock_response(format!("data: {content}\n\n").into_bytes()).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_openai_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], LlmEvent::TextDelta(text) if text == "Hel"));
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedPartial(ProviderError::Connection(message))
+                if message.contains("without a terminal event")
+        ));
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_cut_off_after_reasoning_only_fails_empty() {
+        // Thinking deltas alone must not block a retry: no answer content
+        // reached the consumer, so the cut-off stream is safe to re-run.
+        let reasoning = json!({
+            "choices": [{
+                "delta": {"reasoning_content": "pondering"},
+                "finish_reason": null
+            }]
+        });
+        let response = mock_response(format!("data: {reasoning}\n\n").into_bytes()).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_openai_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], LlmEvent::ThinkingDelta(text) if text == "pondering"));
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedEmpty(ProviderError::Connection(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_embedded_error_frame_fails_empty() {
+        let error = json!({
+            "error": {"code": 500, "message": "upstream exploded"}
+        });
+        let response = mock_response(format!("data: {error}\n\ndata: [DONE]\n\n").into_bytes()).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_openai_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert!(events.is_empty());
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedEmpty(ProviderError::Api { status: 500, message })
+                if message == "upstream exploded"
+        ));
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_embedded_error_after_content_fails_partial() {
+        let content = json!({
+            "choices": [{
+                "delta": {"content": "Hel"},
+                "finish_reason": null
+            }]
+        });
+        let error = json!({
+            "error": {"code": 500, "message": "upstream exploded"}
+        });
+        let response = mock_response(format!("data: {content}\n\ndata: {error}\n\n").into_bytes()).await;
+        let (tx, rx) = mpsc::channel(8);
+
+        let outcome = process_openai_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            outcome,
+            StreamOutcome::FailedPartial(ProviderError::Api { status: 500, .. })
+        ));
     }
 
     fn anthropic_sse_body(include_message_stop: bool) -> Vec<u8> {

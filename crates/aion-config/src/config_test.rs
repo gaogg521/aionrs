@@ -1608,4 +1608,81 @@ tool_wire_shape = "anthropic_input_schema"
         let config = Config::resolve(&cli_args);
         assert!(config.is_ok());
     }
+
+    // -------------------------------------------------------------------------
+    // OpenAI official endpoint compat defaults
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_is_openai_official_url_matches_host_exactly() {
+        assert!(is_openai_official_url("https://api.openai.com"));
+        assert!(is_openai_official_url("https://api.openai.com/v1"));
+        assert!(is_openai_official_url("https://api.openai.com/"));
+        assert!(is_openai_official_url("https://API.OpenAI.com/v1"));
+        assert!(is_openai_official_url("https://api.openai.com:443/v1"));
+        assert!(is_openai_official_url("http://api.openai.com/v1"));
+
+        assert!(!is_openai_official_url("https://api.openai.com.evil.example/v1"));
+        assert!(!is_openai_official_url("https://my-proxy.example.com/v1"));
+        assert!(!is_openai_official_url("https://openai.com/v1"));
+        assert!(!is_openai_official_url(""));
+    }
+
+    fn resolve_openai_config(project_toml: &str) -> Config {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".aionrs.toml"), project_toml).unwrap();
+        let cli = CliArgs {
+            provider: Some("openai".into()),
+            api_key: Some("test-key".into()),
+            base_url: None,
+            model: Some("gpt-5.5".into()),
+            max_tokens: None,
+            thinking: None,
+            thinking_budget: None,
+            max_turns: None,
+            max_tool_call_malformed_turns: None,
+            max_tool_call_failure_turns: None,
+            system_prompt: None,
+            profile: None,
+            auto_approve: false,
+            project_dir: Some(tmp.path().to_path_buf()),
+        };
+        Config::resolve(&cli).unwrap()
+    }
+
+    #[test]
+    fn test_openai_official_endpoint_defaults_to_max_completion_tokens() {
+        let config = resolve_openai_config(
+            r#"
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+"#,
+        );
+        assert_eq!(config.compat.max_tokens_field(), "max_completion_tokens");
+    }
+
+    #[test]
+    fn test_openai_compatible_endpoint_keeps_legacy_max_tokens() {
+        let config = resolve_openai_config(
+            r#"
+[providers.openai]
+base_url = "https://my-proxy.example.com/v1"
+"#,
+        );
+        assert_eq!(config.compat.max_tokens_field(), "max_tokens");
+    }
+
+    #[test]
+    fn test_user_compat_overrides_official_openai_default() {
+        let config = resolve_openai_config(
+            r#"
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+
+[providers.openai.compat]
+max_tokens_field = "max_tokens"
+"#,
+        );
+        assert_eq!(config.compat.max_tokens_field(), "max_tokens");
+    }
 }
