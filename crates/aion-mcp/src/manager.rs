@@ -16,7 +16,19 @@ use super::transport::stdio::StdioTransport;
 use super::transport::streamable_http::StreamableHttpTransport;
 use super::transport::{McpError, McpTransport};
 
-const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 30_000;
+/// Ceiling on how long one unreachable MCP server may hold up session startup.
+///
+/// `connect_all` drains every connection attempt before returning, and the
+/// agent cannot register tools or build its system prompt until it does — so
+/// this value is, in practice, the worst-case delay a user waits before a
+/// session becomes usable. It was 30s, which a single hanging stdio server
+/// (an `npx` launch that stalls, a host that blackholes the connection) spent
+/// in full on every cold start.
+///
+/// Keep it above a realistic cold launch — a first-run `npx` fetch was
+/// measured at ~8.5s — and well under the point where the wait reads as a
+/// hang. Servers that legitimately need longer set `startup_timeout_ms`.
+const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 15_000;
 
 /// A connected MCP server with its discovered tools and capabilities
 struct McpServer {

@@ -161,6 +161,37 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn default_startup_timeout_bounds_a_server_that_never_answers() {
+        // No per-server override, so this pins what an unreachable server costs
+        // every session that has one configured.
+        let configs = HashMap::from([(
+            "hangs".to_string(),
+            delayed_config(DEFAULT_STARTUP_TIMEOUT_MS * 2, None),
+        )]);
+
+        let started_at = tokio::time::Instant::now();
+        let manager = McpManager::connect_all_with_connector(&configs, delayed_test_connect)
+            .await
+            .unwrap();
+        let elapsed = started_at.elapsed();
+
+        assert!(
+            manager.server_names().is_empty(),
+            "a server past the deadline must not be registered"
+        );
+        assert_eq!(
+            elapsed,
+            Duration::from_millis(DEFAULT_STARTUP_TIMEOUT_MS),
+            "connect_all should give up at the default deadline, not wait out the server"
+        );
+        assert!(
+            DEFAULT_STARTUP_TIMEOUT_MS <= 20_000,
+            "this is the worst-case wait before a session becomes usable; raising it \
+             past ~20s reintroduces the stall this bound exists to cap"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // TC-2.x: server_supports_resources [黑盒 + 白盒]
     // -----------------------------------------------------------------------
