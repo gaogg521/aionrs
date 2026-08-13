@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.10](https://github.com/iOfficeAI/aionrs/compare/v0.2.9...v0.2.10) (2026-08-06)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate getrandom-6f8ce4dd05d13bba to 0.4 ([#212](https://github.com/iOfficeAI/aionrs/issues/212)) ([ec435b9](https://github.com/iOfficeAI/aionrs/commit/ec435b9657b4946d2c418fe12377f7f41fe7a1d7))
+
+## [0.2.9](https://github.com/iOfficeAI/aionrs/compare/v0.2.8...v0.2.9) (2026-07-28)
+
+
+### Bug Fixes
+
+* **agent:** eliminate empty responses from embedded stream errors and reasoning-only turns ([9056753](https://github.com/iOfficeAI/aionrs/commit/9056753602a2eb7e4c196f178e08f399754bc1f6))
+* **agent:** keep tools available on first empty-final retry ([159ded6](https://github.com/iOfficeAI/aionrs/commit/159ded6eb9d777ad036203b3145a3fc9ff29e77d))
+* **config:** default to max_completion_tokens for official openai endpoint ([70d5bee](https://github.com/iOfficeAI/aionrs/commit/70d5bee581e3da6e6957448daf2244f39cd7b501))
+* **config:** default to max_completion_tokens for official openai endpoint ([9c806bd](https://github.com/iOfficeAI/aionrs/commit/9c806bd7fcfe756deafaa7335bead5fe29086ea0))
+* **providers:** address review findings on error mapping and retry semantics ([6be9f13](https://github.com/iOfficeAI/aionrs/commit/6be9f13bc9ab5e3be71fa25190ec2176bc519b50))
+* **providers:** fail chat streams on embedded errors and missing terminals ([6ece23d](https://github.com/iOfficeAI/aionrs/commit/6ece23ddd43a9f8f9f4ba5f4d797acdf7ec3560e))
+
 ## [0.2.8](https://github.com/iOfficeAI/aionrs/compare/v0.2.7...v0.2.8) (2026-07-23)
 
 
