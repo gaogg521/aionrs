@@ -45,6 +45,10 @@ aionrs
 aionrs --help
 ```
 
+Interactive terminal sessions open a full-screen conversation UI. Type `/` to
+browse available commands; use Enter to send, Shift+Enter (or Ctrl+J as a fallback) for a newline, and
+Ctrl+C to stop the active turn.
+
 ## Runtime Limits
 
 `max_turns` is the broad model-turn limit per run. It is unset by default,

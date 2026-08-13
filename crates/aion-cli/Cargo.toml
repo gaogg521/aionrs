@@ -23,6 +23,7 @@ aion-mcp.workspace      = true
 aion-protocol.workspace = true
 aion-skills.workspace   = true
 aion-types.workspace    = true
+aion-tui.workspace      = true
 
 tokio.workspace              = true
 anyhow.workspace             = true

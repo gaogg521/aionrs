@@ -234,27 +234,32 @@ aionrs config init
 aionrs "Read and explain crates/aion-agent/src/engine.rs"
 ```
 
-### 3. Interactive REPL
+### 3. Interactive terminal UI
 
-```
-$ aionrs
-
-> Read the file Cargo.toml
-     1  [package]
-     2  name = "aionrs"
-     ...
-[turns: 1 | tokens: 1234 in / 567 out]
-
-> Add serde_yaml to dependencies
-[tool] Write({"file_path":"Cargo.toml","content":"..."})
-Allow? [y]es / [n]o / [a]lways / [q]uit > y
-[Write] OK
-[turns: 2 | tokens: 2345 in / 890 out]
-
-> /quit
+```bash
+aionrs
 ```
 
-REPL commands: `/quit`, `/exit`, or empty line to exit.
+When stdin and stdout are attached to a terminal, `aionrs` opens a full-screen
+conversation UI with streaming responses, tool activity, an editable composer,
+and in-place approval prompts. Type `/` at the beginning of the composer to
+open the command popup, continue typing to filter it, use Up/Down to move, and
+press Tab to complete or Enter to run the selected command.
+
+| Key | Action |
+|-----|--------|
+| Enter | Send the current message |
+| Shift+Enter | Insert a newline (Ctrl+J is available as a fallback) |
+| Up/Down | Select a slash command, or recall message history |
+| PageUp/PageDown | Scroll the conversation |
+| Ctrl+C | Stop the active turn; clear a draft or quit while idle |
+| Ctrl+D | Quit while the composer is empty |
+
+Available commands are `/compact`, `/context`, `/clear`, `/help`, and `/quit`.
+`/exit` is an alias for `/quit`. Empty messages no longer exit interactive mode.
+
+When input or output is redirected, `aionrs` keeps the plain line-oriented REPL
+for compatibility with scripts and terminals that do not support full-screen UI.
 
 ### 4. Switching Profiles
 
@@ -274,7 +279,9 @@ aionrs "List all Rust files in this project"
 
 ## Tool Confirmation
 
-Destructive tools (Write, Edit, ExecCommand) prompt for confirmation before execution:
+Tools that require approval are displayed in an in-place dialog in the terminal
+UI. Press `y` or Enter to allow once, `a` to allow the category for the rest of
+the session, or `n`/Esc to deny. The plain REPL uses the equivalent text prompt:
 
 ```
 [tool] Write({"file_path": "/tmp/test.rs", "content": "..."})
