@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
-use crate::commands::{CommandContext, CommandRegistry, CommandResult, SlashCommand, default_registry};
+use crate::commands::{CommandContext, CommandRegistry, CommandResult, CommandSpec, SlashCommand, default_registry};
 use crate::compact::auto::{CompactError, autocompact, should_autocompact};
 use crate::compact::emergency::is_at_emergency_limit;
 use crate::compact::estimate::{estimate_tokens_from_tool_image, estimate_tokens_from_tool_result};
@@ -396,6 +396,11 @@ impl AgentEngine {
         }
     }
 
+    /// Return the model-visible skills loaded for this engine runtime.
+    pub fn skill_names(&self) -> &[String] {
+        &self.prompt_usage.skills
+    }
+
     /// Get a reference to the output sink
     pub fn output(&self) -> &dyn OutputSink {
         self.output.as_ref()
@@ -747,7 +752,7 @@ impl AgentEngine {
         let (executable_results, executable_modifiers, follow_up_blocks) = if executable_tool_calls.is_empty() {
             (Vec::new(), Vec::new(), Vec::new())
         } else if let Some(ref approval_mgr) = self.approval_manager {
-            // JSON stream mode: use protocol-based approval
+            // Interactive hosts use protocol-based approval.
             let writer = self
                 .protocol_writer
                 .as_ref()
@@ -1304,6 +1309,9 @@ impl AgentEngine {
 
         if let Some(new_model) = model {
             let old = replace(&mut self.model, new_model.clone());
+            if let Some(session) = &mut self.current_session {
+                session.model = new_model.clone();
+            }
             changes.push(format!("model: {old} → {new_model}"));
         }
 
@@ -1376,6 +1384,10 @@ impl AgentEngine {
                     changes.push(format!("compaction: invalid ({e})"));
                 }
             }
+        }
+
+        if model_changed {
+            self.save_session();
         }
 
         changes
@@ -1463,6 +1475,11 @@ impl AgentEngine {
             .iter()
             .map(|cmd| (cmd.name().to_string(), cmd.description().to_string()))
             .collect()
+    }
+
+    /// Return user-facing metadata for interactive slash-command discovery.
+    pub fn slash_commands(&self) -> Vec<CommandSpec> {
+        self.commands.specs()
     }
 
     /// Apply context modifiers collected from skill tool executions.

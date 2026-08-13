@@ -45,6 +45,24 @@ aionrs
 aionrs --help
 ```
 
+Interactive terminal sessions keep finalized conversation in the terminal's
+native scrollback with an inline composer at the bottom. Type `/` to browse
+available commands; use Enter to send, Shift+Enter (or Ctrl+J as a fallback)
+for a newline, and Ctrl+C to stop the active turn. Use the mouse wheel to read
+earlier finalized conversation content. Mouse capture stays
+disabled so terminal text can be selected and copied normally. Consecutive tool
+calls are collected under one `• Tools` step with an appended status row for
+each call. Status keeps an explicit label and semantic color, while tool input
+and output use a responsive one-line preview instead of occupying the
+conversation viewport.
+
+TUI-owned commands include `/status`, `/model`, `/permissions`, `/new`,
+`/resume`, `/mcp`, and `/skills`. Running `/resume` without an ID opens a
+full-screen, mouse- and keyboard-navigable picker containing every saved session
+up to the configured `session.max_sessions` retention limit. Session switches
+rebuild the agent runtime without exiting the interactive UI. A fresh TUI does
+not create a session until the first conversation message is sent.
+
 ## Runtime Limits
 
 `max_turns` is the broad model-turn limit per run. It is unset by default,
