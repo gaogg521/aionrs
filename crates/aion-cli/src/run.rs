@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::env;
 use std::io::{self, IsTerminal};
 use std::sync::Arc;
@@ -6,9 +7,11 @@ use aion_agent::engine::AgentEngine;
 use aion_agent::error::AgentError;
 use aion_agent::output::OutputSink;
 use aion_agent::output::terminal::TerminalSink;
-use aion_config::config::Config;
+use aion_agent::session::{Session, SessionManager};
+use aion_config::config::{Config, SessionConfig};
 use aion_mcp::manager::McpManager;
-use aion_tui::{TuiMetadata, TuiRuntime};
+use aion_tui::{TuiMetadata, TuiOutcome, TuiRuntime, TuiSession};
+use aion_types::message::Message;
 
 use crate::bootstrap::{build_engine, init_logging, resolve_config};
 use crate::cli::Cli;
@@ -41,44 +44,148 @@ pub(crate) async fn run_main_flow(cli: Cli) -> anyhow::Result<()> {
 }
 
 async fn run_tui_flow(config: Config, cwd: &str, cli: &Cli) -> anyhow::Result<()> {
-    let provider_name = config.provider_label.clone();
+    let mut active_config = config;
     let mut tui = TuiRuntime::new(TuiMetadata {
-        model: config.model.clone(),
-        provider: provider_name.clone(),
+        model: active_config.model.clone(),
+        provider: active_config.provider_label.clone(),
         cwd: cwd.to_string(),
         no_color: cli.no_color,
     });
     let output = tui.output_sink();
-    let mut resumed_messages = None;
-    let fork_session = cli.fork_session;
-
-    let result = build_engine(
-        config,
+    tui.prepare_terminal()?;
+    let mut runtime = build_tui_engine(
+        active_config.clone(),
         cwd,
         output.clone(),
         cli.resume.as_deref(),
-        fork_session,
-        |session| {
-            resumed_messages = Some(session.messages.clone());
-            emit_resume_banner(output.as_ref(), session, fork_session);
-        },
+        cli.session_id.as_deref(),
+        cli.fork_session,
     )
     .await?;
-    let mut engine = result.engine;
-    let mcp_managers = result.mcp_managers;
+    configure_tui(&mut tui, &runtime, &active_config);
 
-    if cli.resume.is_none() {
-        engine.init_session(&provider_name, cwd, cli.session_id.as_deref())?;
-    }
+    loop {
+        let outcome = tui.run(&mut runtime.engine).await?;
+        let (resume_id, session_id) = match outcome {
+            TuiOutcome::Exit => {
+                shutdown(&runtime.engine, &runtime.mcp_managers).await;
+                return Ok(());
+            }
+            TuiOutcome::NewSession => (None, None),
+            TuiOutcome::ResumeSession(session_id) => (Some(session_id), None),
+        };
 
-    tui.set_commands(engine.slash_commands());
-    tui.set_session_id(engine.current_session_id());
-    if let Some(messages) = resumed_messages {
-        tui.set_history(&messages);
+        active_config.model = runtime.engine.context_status().model;
+        let next = build_tui_engine(
+            active_config.clone(),
+            cwd,
+            output.clone(),
+            resume_id.as_deref(),
+            session_id,
+            false,
+        )
+        .await;
+        match next {
+            Ok(next) => {
+                shutdown(&runtime.engine, &runtime.mcp_managers).await;
+                runtime = next;
+                configure_tui(&mut tui, &runtime, &active_config);
+            }
+            Err(error) => {
+                tui.show_error(format!("Could not switch session: {error}"));
+            }
+        }
     }
-    let run_result = tui.run(&mut engine).await;
-    shutdown(&engine, &mcp_managers).await;
-    run_result
+}
+
+struct TuiEngineRuntime {
+    engine: AgentEngine,
+    mcp_managers: Vec<Arc<McpManager>>,
+    history: Vec<Message>,
+    session_initialization_pending: bool,
+    requested_session_id: Option<String>,
+}
+
+async fn build_tui_engine(
+    config: Config,
+    cwd: &str,
+    output: Arc<dyn OutputSink>,
+    resume_id: Option<&str>,
+    session_id: Option<&str>,
+    fork_session: bool,
+) -> anyhow::Result<TuiEngineRuntime> {
+    let mut history = None;
+    let result = build_engine(config, cwd, output.clone(), resume_id, fork_session, |session| {
+        history = Some(session.messages.clone());
+    })
+    .await?;
+    Ok(TuiEngineRuntime {
+        engine: result.engine,
+        mcp_managers: result.mcp_managers,
+        history: history.unwrap_or_default(),
+        session_initialization_pending: resume_id.is_none(),
+        requested_session_id: session_id.map(str::to_string),
+    })
+}
+
+fn configure_tui(tui: &mut TuiRuntime, runtime: &TuiEngineRuntime, config: &Config) {
+    let session_id = runtime.engine.current_session_id();
+    tui.set_commands(runtime.engine.slash_commands());
+    tui.reset_session(
+        runtime.engine.context_status().model,
+        config.provider_label.clone(),
+        session_id.clone(),
+        &runtime.history,
+    );
+    if runtime.session_initialization_pending {
+        tui.defer_session_initialization(runtime.requested_session_id.clone());
+    }
+    tui.set_runtime_catalog(
+        mcp_catalog(&runtime.mcp_managers),
+        runtime.engine.skill_names().to_vec(),
+        session_catalog(&config.session, session_id.as_deref()),
+    );
+}
+
+fn mcp_catalog(managers: &[Arc<McpManager>]) -> Vec<String> {
+    let mut servers = Vec::new();
+    for manager in managers {
+        let tools = manager.all_tools();
+        for name in manager.server_names() {
+            let tool_count = tools.iter().filter(|(server, _)| *server == name).count();
+            servers.push(format!("{name} · {tool_count} tools"));
+        }
+    }
+    servers.sort();
+    servers
+}
+
+fn session_catalog(config: &SessionConfig, current_session_id: Option<&str>) -> Result<Vec<TuiSession>, String> {
+    if !config.enabled {
+        return Ok(Vec::new());
+    }
+    let manager = SessionManager::new(config.directory.clone().into(), config.max_sessions);
+    manager.list().map_err(|error| error.to_string()).map(|mut sessions| {
+        sessions.sort_by_key(|session| Reverse(session.updated_at));
+        sessions
+            .into_iter()
+            .filter(|session| Some(session.id.as_str()) != current_session_id)
+            .map(|session| {
+                let summary = if session.summary.is_empty() {
+                    "(empty session)".to_string()
+                } else {
+                    session.summary
+                };
+                TuiSession::new(
+                    session.id,
+                    session.model,
+                    summary,
+                    session.updated_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                    session.message_count,
+                )
+            })
+            .collect()
+    })
 }
 
 async fn run_plain_flow(config: Config, cwd: &str, cli: &Cli, prompt: &str) -> anyhow::Result<()> {
@@ -126,11 +233,7 @@ async fn run_plain_flow(config: Config, cwd: &str, cli: &Cli, prompt: &str) -> a
     Ok(())
 }
 
-fn emit_resume_banner(output: &dyn OutputSink, session: &aion_agent::session::Session, fork_session: bool) {
-    output.emit_info(&resume_banner(session, fork_session));
-}
-
-fn resume_banner(session: &aion_agent::session::Session, fork_session: bool) -> String {
+fn resume_banner(session: &Session, fork_session: bool) -> String {
     if fork_session {
         format!(
             "Forked session {} from {} ({} messages, {} model)",
@@ -196,3 +299,7 @@ async fn repl_loop(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "run_test.rs"]
+mod run_test;

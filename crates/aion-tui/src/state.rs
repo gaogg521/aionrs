@@ -1,12 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use aion_agent::commands::CommandSpec;
 use aion_types::message::{Message, TokenUsage};
 
+use crate::app_command::application_command_specs;
 use crate::command_popup::CommandPopup;
 use crate::composer::Composer;
 use crate::event::AgentEvent;
-use crate::transcript::{EntryKind, TranscriptEntry, entries_from_messages};
+use crate::session_picker::SessionPicker;
+use crate::transcript::{EntryKind, ToolStepStatus, TranscriptEntry, entries_from_messages};
 
 #[derive(Debug)]
 pub(super) struct ApprovalRequest {
@@ -25,15 +27,19 @@ pub(super) struct AppState {
     pub(super) no_color: bool,
     pub(super) composer: Composer,
     pub(super) popup: CommandPopup,
+    pub(super) session_picker: SessionPicker,
     pub(super) transcript: Vec<TranscriptEntry>,
+    pub(super) committed_transcript: usize,
+    pub(super) show_welcome: bool,
     pub(super) approval: Option<ApprovalRequest>,
+    pub(super) initializing: bool,
     pub(super) busy: bool,
     pub(super) spinner_frame: usize,
     pub(super) usage: TokenUsage,
     pub(super) turns: usize,
-    pub(super) scroll_back: usize,
     active_assistant: Option<usize>,
     active_thinking: Option<usize>,
+    active_tools: HashMap<String, usize>,
     protocol_results: HashSet<String>,
 }
 
@@ -47,32 +53,107 @@ impl AppState {
             no_color,
             composer: Composer::default(),
             popup: CommandPopup::default(),
+            session_picker: SessionPicker::default(),
             transcript: Vec::new(),
+            committed_transcript: 0,
+            show_welcome: true,
             approval: None,
+            initializing: false,
             busy: false,
             spinner_frame: 0,
             usage: TokenUsage::default(),
             turns: 0,
-            scroll_back: 0,
             active_assistant: None,
             active_thinking: None,
+            active_tools: HashMap::new(),
             protocol_results: HashSet::new(),
         }
     }
 
     pub(super) fn set_commands(&mut self, commands: Vec<CommandSpec>) {
+        let mut commands = commands;
+        commands.extend(application_command_specs());
+        commands.sort_by(|left, right| left.name.cmp(&right.name));
+        commands.dedup_by(|left, right| left.name == right.name);
         self.popup.set_commands(commands);
     }
 
     pub(super) fn set_history(&mut self, messages: &[Message]) {
         self.transcript = entries_from_messages(messages);
+        self.committed_transcript = 0;
+        self.show_welcome = messages.is_empty();
         self.active_assistant = None;
         self.active_thinking = None;
+        self.active_tools.clear();
+    }
+
+    pub(super) fn begin_initialization(&mut self) {
+        self.initializing = true;
+    }
+
+    pub(super) fn reset_session(
+        &mut self,
+        model: String,
+        provider: String,
+        session_id: Option<String>,
+        messages: &[Message],
+    ) {
+        self.model = model;
+        self.provider = provider;
+        self.session_id = session_id;
+        self.set_history(messages);
+        self.approval = None;
+        self.initializing = false;
+        self.busy = false;
+        self.spinner_frame = 0;
+        self.usage = TokenUsage::default();
+        self.turns = 0;
+        self.composer.clear();
+        self.popup.update("");
+        self.session_picker.close();
+        self.active_tools.clear();
+        self.protocol_results.clear();
+    }
+
+    pub(super) fn pending_transcript(&self) -> &[TranscriptEntry] {
+        &self.transcript[self.committed_transcript.min(self.transcript.len())..]
+    }
+
+    pub(super) fn mark_transcript_committed(&mut self) {
+        self.committed_transcript = self.transcript.len();
+    }
+
+    pub(super) fn commit_streaming_prefix(&mut self, complete_entries: usize, active_byte_count: usize) {
+        let pending_count = self.pending_transcript().len();
+        self.committed_transcript = self
+            .committed_transcript
+            .saturating_add(complete_entries.min(pending_count));
+        if active_byte_count > 0
+            && let Some(active) = self.transcript.get_mut(self.committed_transcript)
+        {
+            active.advance_display_offset(active_byte_count);
+        }
+    }
+
+    pub(super) fn can_commit_streaming_lines(&self) -> bool {
+        self.busy
+            && self
+                .pending_transcript()
+                .last()
+                .is_some_and(|entry| matches!(entry.kind, EntryKind::Assistant | EntryKind::Thinking))
+    }
+
+    pub(super) fn push_info(&mut self, label: &str, text: impl Into<String>) {
+        self.transcript.push(TranscriptEntry::new(EntryKind::Info, label, text));
+    }
+
+    pub(super) fn push_error(&mut self, text: impl Into<String>) {
+        self.transcript
+            .push(TranscriptEntry::new(EntryKind::Error, "Error", text));
     }
 
     pub(super) fn begin_turn(&mut self, input: &str) {
         self.busy = true;
-        self.scroll_back = 0;
         self.active_assistant = None;
         self.active_thinking = None;
         if !self.popup.recognizes(input) {
@@ -106,7 +187,6 @@ impl AppState {
     }
 
     pub(super) fn handle_agent_event(&mut self, event: AgentEvent) {
-        self.scroll_back = 0;
         match event {
             AgentEvent::StreamStart => {
                 self.active_assistant = None;
@@ -120,8 +200,8 @@ impl AppState {
             AgentEvent::Error(text) => self
                 .transcript
                 .push(TranscriptEntry::new(EntryKind::Error, "Error", text)),
-            AgentEvent::ToolCall { name, input } => {
-                self.transcript.push(TranscriptEntry::new(EntryKind::Tool, name, input));
+            AgentEvent::ToolCall { call_id, name, input } => {
+                self.update_tool_step(&call_id, &name, ToolStepStatus::Queued, Some(input))
             }
             AgentEvent::ToolResult {
                 call_id,
@@ -132,8 +212,12 @@ impl AppState {
                 if self.protocol_results.remove(&call_id) {
                     return;
                 }
-                let kind = if is_error { EntryKind::Error } else { EntryKind::Tool };
-                self.transcript.push(TranscriptEntry::new(kind, name, content));
+                let status = if is_error {
+                    ToolStepStatus::Error
+                } else {
+                    ToolStepStatus::Success
+                };
+                self.update_tool_step(&call_id, &name, status, Some(content));
             }
             AgentEvent::ProtocolToolResult {
                 call_id,
@@ -141,9 +225,13 @@ impl AppState {
                 is_error,
                 content,
             } => {
+                let status = if is_error {
+                    ToolStepStatus::Error
+                } else {
+                    ToolStepStatus::Success
+                };
+                self.update_tool_step(&call_id, &name, status, Some(content));
                 self.protocol_results.insert(call_id);
-                let kind = if is_error { EntryKind::Error } else { EntryKind::Tool };
-                self.transcript.push(TranscriptEntry::new(kind, name, content));
             }
             AgentEvent::ApprovalRequested {
                 call_id,
@@ -151,6 +239,7 @@ impl AppState {
                 description,
                 input,
             } => {
+                self.update_tool_step(&call_id, &name, ToolStepStatus::Approval, None);
                 self.approval = Some(ApprovalRequest {
                     call_id,
                     name,
@@ -162,20 +251,35 @@ impl AppState {
                 if self.approval.as_ref().is_some_and(|request| request.call_id == call_id) {
                     self.approval = None;
                 }
-                self.transcript
-                    .push(TranscriptEntry::new(EntryKind::Tool, name, "Running…"));
+                self.update_tool_step(&call_id, &name, ToolStepStatus::Running, None);
             }
             AgentEvent::ToolCancelled { call_id, name, reason } => {
                 if self.approval.as_ref().is_some_and(|request| request.call_id == call_id) {
                     self.approval = None;
                 }
-                self.transcript.push(TranscriptEntry::new(
-                    EntryKind::Error,
-                    name,
-                    format!("Cancelled: {reason}"),
-                ));
+                self.update_tool_step(&call_id, &name, ToolStepStatus::Cancelled, Some(reason));
             }
         }
+    }
+
+    fn update_tool_step(&mut self, call_id: &str, name: &str, status: ToolStepStatus, text: Option<String>) {
+        if let Some(index) = self.active_tools.get(call_id).copied()
+            && let Some(entry) = self.transcript.get_mut(index)
+        {
+            if name != "tool" {
+                entry.label = name.to_string();
+            }
+            entry.tool_status = Some(status);
+            if let Some(text) = text {
+                entry.text = text;
+            }
+            return;
+        }
+
+        let index = self.transcript.len();
+        self.transcript
+            .push(TranscriptEntry::tool(name, text.unwrap_or_default(), status));
+        self.active_tools.insert(call_id.to_string(), index);
     }
 
     fn append_stream(&mut self, kind: EntryKind, label: &str, text: String) {

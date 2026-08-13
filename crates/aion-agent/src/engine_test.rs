@@ -17,10 +17,12 @@ mod tests_set_config {
     use aion_tools::registry::ToolRegistry;
     use aion_types::llm::{LlmEvent, LlmRequest};
     use aion_types::message::ImageInputCapability;
+    use tempfile::tempdir;
 
     use super::{CompactLevel, ProviderCompat};
     use crate::confirm::ToolConfirmer;
     use crate::output::OutputSink;
+    use crate::session::SessionManager;
 
     struct NullOutput;
     impl OutputSink for NullOutput {
@@ -99,6 +101,23 @@ mod tests_set_config {
         assert_eq!(changes.len(), 1);
         assert!(changes[0].contains("old-model"));
         assert!(changes[0].contains("new-model"));
+    }
+
+    #[test]
+    fn set_config_model_change_persists_session_metadata_immediately() {
+        let directory = tempdir().unwrap();
+        let manager = SessionManager::new(directory.path().to_path_buf(), 10);
+        let session = manager
+            .create("openai", "old-model", "/workspace", Some("model-switch"))
+            .unwrap();
+        let mut engine = make_engine("old-model");
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(session);
+
+        engine.apply_config_update(Some("new-model".into()), None, None, None, None, None);
+
+        let manager = SessionManager::new(directory.path().to_path_buf(), 10);
+        assert_eq!(manager.load("model-switch").unwrap().model, "new-model");
     }
 
     #[test]

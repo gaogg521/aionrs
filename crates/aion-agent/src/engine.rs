@@ -396,6 +396,11 @@ impl AgentEngine {
         }
     }
 
+    /// Return the model-visible skills loaded for this engine runtime.
+    pub fn skill_names(&self) -> &[String] {
+        &self.prompt_usage.skills
+    }
+
     /// Get a reference to the output sink
     pub fn output(&self) -> &dyn OutputSink {
         self.output.as_ref()
@@ -1304,6 +1309,9 @@ impl AgentEngine {
 
         if let Some(new_model) = model {
             let old = replace(&mut self.model, new_model.clone());
+            if let Some(session) = &mut self.current_session {
+                session.model = new_model.clone();
+            }
             changes.push(format!("model: {old} → {new_model}"));
         }
 
@@ -1376,6 +1384,10 @@ impl AgentEngine {
                     changes.push(format!("compaction: invalid ({e})"));
                 }
             }
+        }
+
+        if model_changed {
+            self.save_session();
         }
 
         changes

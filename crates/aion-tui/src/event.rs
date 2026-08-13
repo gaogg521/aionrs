@@ -14,6 +14,7 @@ pub(super) enum AgentEvent {
     Info(String),
     Error(String),
     ToolCall {
+        call_id: String,
         name: String,
         input: String,
     },
@@ -69,8 +70,9 @@ impl OutputSink for TuiSink {
         self.send(AgentEvent::Thinking(text.to_string()));
     }
 
-    fn emit_tool_call(&self, _tool_use_id: &str, name: &str, input: &str) {
+    fn emit_tool_call(&self, tool_use_id: &str, name: &str, input: &str) {
         self.send(AgentEvent::ToolCall {
+            call_id: tool_use_id.to_string(),
             name: name.to_string(),
             input: input.to_string(),
         });

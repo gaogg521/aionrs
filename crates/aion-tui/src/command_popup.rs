@@ -46,6 +46,10 @@ impl CommandPopup {
         self.selected
     }
 
+    pub(super) fn commands(&self) -> &[CommandSpec] {
+        &self.commands
+    }
+
     pub(super) fn move_next(&mut self) {
         let count = self.matches().len();
         if count > 0 {

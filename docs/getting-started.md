@@ -240,26 +240,60 @@ aionrs "Read and explain crates/aion-agent/src/engine.rs"
 aionrs
 ```
 
-When stdin and stdout are attached to a terminal, `aionrs` opens a full-screen
-conversation UI with streaming responses, tool activity, an editable composer,
-and in-place approval prompts. Type `/` at the beginning of the composer to
+When stdin and stdout are attached to a terminal, `aionrs` keeps finalized
+conversation in native terminal scrollback and renders an inline composer at
+the bottom, with streaming responses, tool activity, and in-place approval
+prompts. Type `/` at the beginning of the composer to
 open the command popup, continue typing to filter it, use Up/Down to move, and
 press Tab to complete or Enter to run the selected command.
+
+Each thinking segment starts with `•`. Consecutive tool calls are collected
+under a single `• Tools` step and appended as nested rows, so a batch remains
+easy to scan without losing its individual calls. Tool rows update in place as
+`queued`, `approval`, `running`, `done`, `failed`, or `cancelled`; the status
+label and semantic color change together. Tool input and output are displayed
+as a responsive one-line preview, while the full value remains in the saved
+conversation.
 
 | Key | Action |
 |-----|--------|
 | Enter | Send the current message |
 | Shift+Enter | Insert a newline (Ctrl+J is available as a fallback) |
-| Up/Down | Select a slash command, or recall message history |
-| PageUp/PageDown | Scroll the conversation |
+| Up/Down | Select a slash command |
+| Mouse wheel | Scroll finalized conversation in the terminal's native scrollback |
 | Ctrl+C | Stop the active turn; clear a draft or quit while idle |
 | Ctrl+D | Quit while the composer is empty |
 
-Available commands are `/compact`, `/context`, `/clear`, `/help`, and `/quit`.
-`/exit` is an alias for `/quit`. Empty messages no longer exit interactive mode.
+Mouse capture is deliberately disabled. Drag across any visible conversation
+text and use the terminal's normal copy shortcut (`Cmd+C` on macOS or usually
+`Ctrl+Shift+C` on Linux/Windows terminals).
+
+Agent commands are `/compact`, `/context`, `/clear`, `/help`, and `/quit`.
+The interactive UI also provides:
+
+| Command | Description |
+|---------|-------------|
+| `/status` | Show provider, model, session, permission mode, and context usage |
+| `/model [name]` | Show the current model or switch to a model ID |
+| `/permissions [default\|auto_edit\|yolo]` | Show or change the tool approval mode |
+| `/new` | Start a new session without exiting the interactive UI |
+| `/resume [id\|latest]` | Open the session picker or resume an ID in place |
+| `/mcp` | Show connected MCP servers and tool counts |
+| `/skills` | Show model-visible skills loaded for the current runtime |
+
+The session picker replaces the conversation with a focused full-screen list.
+Use the mouse wheel or Up/Down to move, Enter to resume, and Esc to close it.
+All saved sessions are shown in last-update order; the number retained on disk
+is controlled by `session.max_sessions` (20 by default).
+Resumed conversations are restored into the terminal's native scrollback. Use
+the mouse wheel to move between the earliest and latest turns.
+
+`/help` combines both command groups. `/exit` is an alias for `/quit`. Empty
+messages no longer exit interactive mode. Model switching accepts an explicit
+model ID; an interactive model candidate picker is not available yet.
 
 When input or output is redirected, `aionrs` keeps the plain line-oriented REPL
-for compatibility with scripts and terminals that do not support full-screen UI.
+for compatibility with scripts and terminals that do not support the interactive UI.
 
 ### 4. Switching Profiles
 
@@ -303,7 +337,10 @@ Allow? [y]es / [n]o / [a]lways / [q]uit > y
 
 ## Session Management
 
-Sessions auto-save to `.aionrs/sessions/`.
+Sessions auto-save to `.aionrs/sessions/<session-id>/state.json`. Sessions
+created by versions that used the duplicated
+`.aionrs/sessions/sessions/<session-id>/state.json` layout remain readable and
+are copied to the normalized location when resumed.
 
 ```bash
 # List saved sessions
