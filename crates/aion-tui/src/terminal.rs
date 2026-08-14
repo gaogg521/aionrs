@@ -82,14 +82,13 @@ pub(super) fn reset_inline_synchronized(terminal: &mut AppTerminal) -> anyhow::R
     let reset_result = (|| -> anyhow::Result<()> {
         terminal.autoresize()?;
         terminal.clear()?;
+        // Keep this as one ordered sequence. Some terminals, including tmux, only purge
+        // scrollback reliably when the visible screen is cleared before CSI 3 J.
+        terminal
+            .backend_mut()
+            .write_all(b"\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H")?;
         terminal.backend_mut().flush()?;
-        execute!(
-            terminal.backend_mut(),
-            Clear(ClearType::Purge),
-            Clear(ClearType::All),
-            MoveTo(0, 0),
-            Hide
-        )?;
+        execute!(terminal.backend_mut(), Hide)?;
         Ok(())
     })();
     let end_result = execute!(terminal.backend_mut(), EndSynchronizedUpdate);

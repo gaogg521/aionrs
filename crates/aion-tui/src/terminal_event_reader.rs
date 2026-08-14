@@ -46,13 +46,21 @@ impl TerminalEventReader {
     pub(super) async fn next(&mut self) -> Option<io::Result<Event>> {
         self.receiver.recv().await
     }
-}
 
-impl Drop for TerminalEventReader {
-    fn drop(&mut self) {
+    pub(super) fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+
+    pub(super) fn restart(&mut self) {
+        *self = Self::new();
+    }
+}
+
+impl Drop for TerminalEventReader {
+    fn drop(&mut self) {
+        self.stop();
     }
 }

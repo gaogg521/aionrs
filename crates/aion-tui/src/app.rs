@@ -200,9 +200,9 @@ impl TuiRuntime {
                         }
                         Event::Resize(_, _) => {
                             if self.state.session_picker.is_visible() {
-                                clear_synchronized(terminal_session.terminal())?;
+                                resize_terminal(terminal_session.terminal(), &mut terminal_events)?;
                             } else {
-                                self.reflow_history(terminal_session.terminal())?;
+                                self.reflow_history(terminal_session.terminal(), &mut terminal_events)?;
                             }
                         }
                         _ => {}
@@ -382,7 +382,7 @@ impl TuiRuntime {
                                 cancelled = true;
                                 break None;
                             }
-                            Event::Resize(_, _) => self.reflow_history(terminal)?,
+                            Event::Resize(_, _) => self.reflow_history(terminal, terminal_events)?,
                             _ => {}
                         }
                     }
@@ -579,21 +579,27 @@ impl TuiRuntime {
         draw_synchronized(terminal, |frame| ui::render(frame, &self.state))
     }
 
-    fn reflow_history(&mut self, terminal: &mut AppTerminal) -> anyhow::Result<()> {
-        let replayable_count = self.state.prepare_history_replay();
-        reset_inline_synchronized(terminal)?;
-        let width = terminal.size()?.width.saturating_sub(2).max(1);
-        let lines = if self.state.transcript.is_empty() && self.state.show_welcome {
-            self.state.show_welcome = false;
-            ui::welcome_history_lines(&self.state, width)
-        } else {
-            ui::history_prefix_lines(&self.state, replayable_count, width)
-        };
-        if !lines.is_empty() {
-            insert_history_lines(terminal, lines)?;
-        }
-        self.state.mark_transcript_prefix_committed(replayable_count);
-        clear_synchronized(terminal)
+    fn reflow_history(
+        &mut self,
+        terminal: &mut AppTerminal,
+        terminal_events: &mut TerminalEventReader,
+    ) -> anyhow::Result<()> {
+        with_terminal_events_paused(terminal_events, || {
+            let replayable_count = self.state.prepare_history_replay();
+            reset_inline_synchronized(terminal)?;
+            let width = terminal.size()?.width.saturating_sub(2).max(1);
+            let lines = if self.state.transcript.is_empty() && self.state.show_welcome {
+                self.state.show_welcome = false;
+                ui::welcome_history_lines(&self.state, width)
+            } else {
+                ui::history_prefix_lines(&self.state, replayable_count, width)
+            };
+            if !lines.is_empty() {
+                insert_history_lines(terminal, lines)?;
+            }
+            self.state.mark_transcript_prefix_committed(replayable_count);
+            clear_synchronized(terminal)
+        })
     }
 
     fn commit_pending_history(&mut self, terminal: &mut AppTerminal) -> anyhow::Result<()> {
@@ -627,6 +633,20 @@ impl TuiRuntime {
             .commit_streaming_prefix(commit.complete_entries, commit.active_byte_count);
         Ok(())
     }
+}
+
+fn resize_terminal(terminal: &mut AppTerminal, terminal_events: &mut TerminalEventReader) -> anyhow::Result<()> {
+    with_terminal_events_paused(terminal_events, || clear_synchronized(terminal))
+}
+
+fn with_terminal_events_paused<T>(
+    terminal_events: &mut TerminalEventReader,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    terminal_events.stop();
+    let result = operation();
+    terminal_events.restart();
+    result
 }
 
 fn application_help(commands: &[CommandSpec]) -> String {
