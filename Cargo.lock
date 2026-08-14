@@ -261,7 +261,6 @@ dependencies = [
  "aion-types",
  "anyhow",
  "crossterm",
- "futures",
  "pulldown-cmark",
  "ratatui",
  "serde_json",

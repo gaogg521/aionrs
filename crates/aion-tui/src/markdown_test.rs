@@ -58,6 +58,48 @@ fn fenced_code_block_hides_fences_and_fills_each_code_row() {
 }
 
 #[test]
+fn markdown_table_renders_borders_columns_and_alignment() {
+    let markdown = "| Name | Value |\n| :--- | ----: |\n| alpha | 42 |";
+    let lines = render_markdown(markdown, 32, theme());
+    let rendered = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
+
+    assert!(rendered.first().is_some_and(|line| line.starts_with('┌')));
+    assert!(rendered.last().is_some_and(|line| line.starts_with('└')));
+    let header = rendered
+        .iter()
+        .position(|line| line.contains("Name") && line.contains("Value"))
+        .expect("table header should preserve separate columns");
+    assert!(rendered.get(header + 1).is_some_and(|line| line.starts_with('├')));
+    let data = rendered
+        .iter()
+        .find(|line| line.contains("alpha"))
+        .expect("table row should be rendered");
+    let cells = data.split('│').collect::<Vec<_>>();
+    assert_eq!(cells[1].trim(), "alpha");
+    assert_eq!(cells[2].trim(), "42");
+    assert!(cells[2].ends_with("42 "), "right-aligned cell: {data}");
+    assert!(
+        lines[header]
+            .spans
+            .iter()
+            .any(|span| span.content.contains("Name") && span.style.add_modifier.contains(Modifier::BOLD))
+    );
+    assert!(rendered.iter().all(|line| UnicodeWidthStr::width(line.as_str()) <= 32));
+}
+
+#[test]
+fn narrow_table_falls_back_to_stacked_rows_without_overflowing() {
+    let markdown = "| 名称 | 说明 |\n| --- | --- |\n| 微压缩 | 保留上下文 |";
+    let lines = render_markdown(markdown, 12, theme());
+    let rendered = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let compact = rendered.join("").replace(' ', "");
+
+    assert!(compact.contains("名称:微压缩"));
+    assert!(compact.contains("说明:保留上下文"));
+    assert!(rendered.iter().all(|line| UnicodeWidthStr::width(line.as_str()) <= 12));
+}
+
+#[test]
 fn lists_quotes_and_headings_render_without_source_markers() {
     let markdown = "## Summary\n\n- first\n- **second**\n\n> quoted `value`";
     let lines = render_markdown(markdown, 40, theme());

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use aion_agent::compact::auto::is_compact_boundary;
 use aion_types::message::{ContentBlock, Message, Role};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +78,10 @@ impl TranscriptEntry {
         self.display_offset = self.display_offset.saturating_add(byte_count).min(self.text.len());
     }
 
+    pub(super) fn reset_display_offset(&mut self) {
+        self.display_offset = 0;
+    }
+
     pub(super) fn is_stable_for_history(&self) -> bool {
         self.kind != EntryKind::Tool || self.tool_status.is_some_and(ToolStepStatus::is_terminal)
     }
@@ -85,7 +90,16 @@ impl TranscriptEntry {
 pub(super) fn entries_from_messages(messages: &[Message]) -> Vec<TranscriptEntry> {
     let mut entries = Vec::new();
     let mut tool_entries = HashMap::new();
+    let mut skip_compact_summary = false;
     for message in messages {
+        if skip_compact_summary {
+            skip_compact_summary = false;
+            continue;
+        }
+        if is_compact_boundary(message) {
+            skip_compact_summary = true;
+            continue;
+        }
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => match message.role {

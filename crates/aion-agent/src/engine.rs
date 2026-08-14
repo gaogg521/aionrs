@@ -16,7 +16,9 @@ use crate::context_usage::{
     estimate_tool_definitions_tokens,
 };
 use crate::error::AgentError;
-use crate::orchestration::{ExecutionControl, execute_tool_calls, execute_tool_calls_with_approval};
+use crate::orchestration::{
+    ExecutionControl, execute_tool_calls_with_approval_and_output_limit, execute_tool_calls_with_output_limit,
+};
 use crate::output::OutputSink;
 use crate::plan::prompt::plan_mode_instructions;
 use crate::plan::state::PlanState;
@@ -758,7 +760,7 @@ impl AgentEngine {
                 .as_ref()
                 .expect("protocol writer required for approval");
             let auto_approve = self.confirmer.lock().unwrap().is_auto_approve();
-            match execute_tool_calls_with_approval(
+            match execute_tool_calls_with_approval_and_output_limit(
                 &self.tools,
                 &executable_tool_calls,
                 approval_mgr,
@@ -769,6 +771,7 @@ impl AgentEngine {
                 self.hooks.as_mut(),
                 self.compact_level,
                 self.toon_enabled,
+                self.compact_config.tool_output_max_bytes,
             )
             .await
             {
@@ -780,13 +783,14 @@ impl AgentEngine {
             }
         } else {
             // Terminal mode: use interactive confirmation
-            match execute_tool_calls(
+            match execute_tool_calls_with_output_limit(
                 &self.tools,
                 &executable_tool_calls,
                 &self.confirmer,
                 self.hooks.as_mut(),
                 self.compact_level,
                 self.toon_enabled,
+                self.compact_config.tool_output_max_bytes,
             )
             .await
             {
@@ -1127,14 +1131,14 @@ impl AgentEngine {
         }
     }
 
-    /// Run the multi-level compaction pipeline before each API call.
+    /// Run context compaction guards before each API call.
     ///
-    /// Execution order: microcompact → autocompact → emergency check.
+    /// Execution order: optional legacy microcompact → autocompact → emergency check.
     /// After a successful autocompact the emergency check is skipped
     /// because the context has been significantly reduced.
     async fn run_compaction(&mut self) -> Result<(), AgentError> {
         // 1. Microcompact (lightweight, no LLM call)
-        if should_microcompact(&self.messages, &self.compact_config) {
+        if self.compact_config.microcompact_enabled && should_microcompact(&self.messages, &self.compact_config) {
             let result = microcompact(&mut self.messages, &self.compact_config);
             if result.cleared_count > 0 {
                 self.output.emit_info(&format!(

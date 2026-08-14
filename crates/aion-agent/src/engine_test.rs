@@ -1188,6 +1188,36 @@ mod tests_compact {
     // -- Microcompact runs when count trigger fires --
 
     #[tokio::test]
+    async fn microcompact_is_disabled_by_default() {
+        let mut messages = Vec::new();
+        for i in 0..12 {
+            let id = format!("t{i}");
+            messages.push(tool_use_msg(&id, "Read"));
+            messages.push(tool_result_msg(&id, &format!("data-{i}")));
+        }
+
+        let config = CompactConfig {
+            micro_keep_recent: 3,
+            ..Default::default()
+        };
+        let state = CompactState::new();
+        let mut engine = make_compact_engine(config, state, messages);
+
+        engine.run_compaction().await.unwrap();
+
+        let cleared_count = engine
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter(
+                |block| matches!(block, ContentBlock::ToolResult { content, .. } if content == "[Tool result cleared]"),
+            )
+            .count();
+        assert_eq!(cleared_count, 0);
+        assert_eq!(engine.context_state.microcompact_count, 0);
+    }
+
+    #[tokio::test]
     async fn microcompact_clears_old_results() {
         // 12 tool results with keep_recent=3 (threshold=6) → should clear 9
         let mut messages = Vec::new();
@@ -1198,6 +1228,7 @@ mod tests_compact {
         }
 
         let config = CompactConfig {
+            microcompact_enabled: true,
             micro_keep_recent: 3,
             ..Default::default()
         };
@@ -1236,6 +1267,7 @@ mod tests_compact {
             context_window: 200_000,
             emergency_buffer: 3_000,
             max_failures: 3,
+            microcompact_enabled: true,
             micro_keep_recent: 1,
             ..Default::default()
         };
@@ -1320,6 +1352,7 @@ mod tests_compact {
 
         let config = CompactConfig {
             enabled: false,
+            microcompact_enabled: true,
             micro_keep_recent: 3,
             ..Default::default()
         };

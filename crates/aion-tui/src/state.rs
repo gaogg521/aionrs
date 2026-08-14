@@ -10,12 +10,38 @@ use crate::event::AgentEvent;
 use crate::session_picker::SessionPicker;
 use crate::transcript::{EntryKind, ToolStepStatus, TranscriptEntry, entries_from_messages};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ApprovalChoice {
+    Once,
+    Always,
+    Deny,
+}
+
+impl ApprovalChoice {
+    pub(super) fn previous(self) -> Self {
+        match self {
+            Self::Once => Self::Deny,
+            Self::Always => Self::Once,
+            Self::Deny => Self::Always,
+        }
+    }
+
+    pub(super) fn next(self) -> Self {
+        match self {
+            Self::Once => Self::Always,
+            Self::Always => Self::Deny,
+            Self::Deny => Self::Once,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ApprovalRequest {
     pub(super) call_id: String,
     pub(super) name: String,
     pub(super) description: String,
     pub(super) input: String,
+    pub(super) choice: ApprovalChoice,
 }
 
 #[derive(Debug)]
@@ -121,6 +147,25 @@ impl AppState {
 
     pub(super) fn mark_transcript_committed(&mut self) {
         self.committed_transcript = self.transcript.len();
+    }
+
+    pub(super) fn prepare_history_replay(&mut self) -> usize {
+        self.committed_transcript = 0;
+        for entry in &mut self.transcript {
+            entry.reset_display_offset();
+        }
+        self.show_welcome = self.transcript.is_empty();
+
+        let first_unstable_tool = self.transcript.iter().position(|entry| !entry.is_stable_for_history());
+        [self.active_assistant, self.active_thinking, first_unstable_tool]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(self.transcript.len())
+    }
+
+    pub(super) fn mark_transcript_prefix_committed(&mut self, count: usize) {
+        self.committed_transcript = count.min(self.transcript.len());
     }
 
     pub(super) fn commit_streaming_prefix(&mut self, complete_entries: usize, active_byte_count: usize) {
@@ -245,6 +290,7 @@ impl AppState {
                     name,
                     description,
                     input,
+                    choice: ApprovalChoice::Once,
                 });
             }
             AgentEvent::ToolRunning { call_id, name } => {
