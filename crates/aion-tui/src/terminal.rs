@@ -77,6 +77,27 @@ pub(super) fn clear_synchronized(terminal: &mut AppTerminal) -> anyhow::Result<(
     Ok(())
 }
 
+pub(super) fn reset_inline_synchronized(terminal: &mut AppTerminal) -> anyhow::Result<()> {
+    execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+    let reset_result = (|| -> anyhow::Result<()> {
+        terminal.autoresize()?;
+        terminal.clear()?;
+        terminal.backend_mut().flush()?;
+        execute!(
+            terminal.backend_mut(),
+            Clear(ClearType::Purge),
+            Clear(ClearType::All),
+            MoveTo(0, 0),
+            Hide
+        )?;
+        Ok(())
+    })();
+    let end_result = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
+    reset_result?;
+    end_result?;
+    Ok(())
+}
+
 pub(super) fn insert_history_lines(terminal: &mut AppTerminal, lines: Vec<Line<'static>>) -> anyhow::Result<()> {
     for chunk in lines.chunks(usize::from(u16::MAX)) {
         let height = u16::try_from(chunk.len()).unwrap_or(u16::MAX);
@@ -194,15 +215,8 @@ impl TerminalSession {
 
     pub(super) fn reset_inline(&mut self) -> anyhow::Result<()> {
         debug_assert!(!self.picker_mode);
-        self.inline_terminal.draw(|frame| frame.buffer_mut().reset())?;
-        self.inline_terminal.backend_mut().flush()?;
-        execute!(
-            self.inline_terminal.backend_mut(),
-            Clear(ClearType::Purge),
-            Clear(ClearType::All),
-            MoveTo(0, 0),
-            Hide
-        )?;
+        reset_inline_synchronized(&mut self.inline_terminal)?;
+        self.inline_terminal = inline_terminal(io::stdout())?;
         Ok(())
     }
 }

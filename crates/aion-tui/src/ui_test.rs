@@ -6,8 +6,9 @@ use ratatui::style::{Color, Modifier};
 use super::{
     aion_mark_lines, entry_style, pending_history_lines, render, streaming_history_commit, welcome_history_lines,
 };
+use crate::event::AgentEvent;
 use crate::session_picker::TuiSession;
-use crate::state::AppState;
+use crate::state::{AppState, ApprovalChoice};
 use crate::transcript::{EntryKind, ToolStepStatus, TranscriptEntry};
 
 #[test]
@@ -173,6 +174,51 @@ fn welcome_renders_ascii_aion_mark() {
     let rendered = terminal.backend().to_string();
     assert!(rendered.contains("::::::::"));
     assert!(rendered.contains("AionCLI"));
+}
+
+#[test]
+fn approval_modal_keeps_actions_visible_and_marks_the_selected_choice() {
+    let mut state = AppState::new(
+        "model".to_string(),
+        "provider".to_string(),
+        "/workspace".to_string(),
+        true,
+    );
+    state.handle_agent_event(AgentEvent::ApprovalRequested {
+        call_id: "call-1".to_string(),
+        name: "shell".to_string(),
+        description: "Run a command".to_string(),
+        input: "very long input ".repeat(30),
+    });
+    state.approval.as_mut().expect("approval should exist").choice = ApprovalChoice::Always;
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+    terminal
+        .draw(|frame| render(frame, &state))
+        .expect("render should succeed");
+
+    let rendered = terminal.backend().to_string();
+    assert!(rendered.contains("Allow once"));
+    assert!(rendered.contains("Always allow"));
+    assert!(rendered.contains("Enter confirm"));
+    let action_row = rendered
+        .lines()
+        .position(|line| line.contains("Always allow"))
+        .expect("approval actions should be visible") as u16;
+    let action_line = rendered
+        .lines()
+        .nth(usize::from(action_row))
+        .expect("action row should exist");
+    let action_column = action_line
+        .find("Always allow")
+        .expect("selected action should be present") as u16;
+    let selected = terminal
+        .backend()
+        .buffer()
+        .cell((action_column, action_row))
+        .expect("selected action cell should exist");
+    assert!(selected.modifier.contains(Modifier::REVERSED));
 }
 
 #[test]

@@ -7,6 +7,7 @@ mod markdown;
 mod session_picker;
 mod state;
 mod terminal;
+mod terminal_event_reader;
 mod transcript;
 mod ui;
 

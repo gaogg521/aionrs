@@ -10,16 +10,19 @@ use aion_protocol::commands::{ApprovalScope, SessionMode};
 use aion_protocol::writer::ProtocolEmitter;
 use aion_protocol::{ToolApprovalManager, ToolApprovalResult};
 use aion_types::message::Message;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use futures::StreamExt;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time;
 
 use crate::app_command::ApplicationCommand;
 use crate::event::{AgentEvent, TuiProtocolEmitter, TuiSink};
 use crate::session_picker::TuiSession;
-use crate::state::AppState;
-use crate::terminal::{AppTerminal, TerminalSession, clear_synchronized, draw_synchronized, insert_history_lines};
+use crate::state::{AppState, ApprovalChoice};
+use crate::terminal::{
+    AppTerminal, TerminalSession, clear_synchronized, draw_synchronized, insert_history_lines,
+    reset_inline_synchronized,
+};
+use crate::terminal_event_reader::TerminalEventReader;
 use crate::ui;
 
 static MESSAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -151,7 +154,7 @@ impl TuiRuntime {
             self.commit_pending_history(terminal_session.terminal())?;
             self.history_replay_pending = false;
         }
-        let mut terminal_events = EventStream::new();
+        let mut terminal_events = TerminalEventReader::new();
         let mut ticker = time::interval(Duration::from_millis(120));
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
@@ -196,7 +199,11 @@ impl TuiRuntime {
                             }
                         }
                         Event::Resize(_, _) => {
-                            clear_synchronized(terminal_session.terminal())?;
+                            if self.state.session_picker.is_visible() {
+                                clear_synchronized(terminal_session.terminal())?;
+                            } else {
+                                self.reflow_history(terminal_session.terminal())?;
+                            }
                         }
                         _ => {}
                     }
@@ -329,7 +336,7 @@ impl TuiRuntime {
         engine: &mut AgentEngine,
         input: String,
         terminal: &mut AppTerminal,
-        terminal_events: &mut EventStream,
+        terminal_events: &mut TerminalEventReader,
         ticker: &mut time::Interval,
     ) -> anyhow::Result<bool> {
         if self.session_initialization_pending && starts_conversation(&input) {
@@ -375,7 +382,7 @@ impl TuiRuntime {
                                 cancelled = true;
                                 break None;
                             }
-                            Event::Resize(_, _) => clear_synchronized(terminal)?,
+                            Event::Resize(_, _) => self.reflow_history(terminal)?,
                             _ => {}
                         }
                     }
@@ -491,32 +498,58 @@ impl TuiRuntime {
 
     /// Returns true when the active turn should be cancelled.
     fn handle_running_key(&mut self, key: KeyEvent) -> bool {
-        if let Some(request) = &self.state.approval {
-            let call_id = request.call_id.clone();
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
-                    self.approval_manager.approve(&call_id, ApprovalScope::Once);
-                    self.state.approval = None;
+        if self.state.approval.is_some() {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                self.deny_pending_approval("Turn cancelled by user");
+                return true;
+            }
+
+            let shortcut = match key.code {
+                KeyCode::Char(character) => Some(character.to_ascii_lowercase()),
+                _ => None,
+            };
+            let choice = match (key.code, shortcut) {
+                (KeyCode::Left | KeyCode::Up | KeyCode::BackTab, _) => {
+                    if let Some(request) = self.state.approval.as_mut() {
+                        request.choice = request.choice.previous();
+                    }
+                    None
                 }
-                KeyCode::Char('a') => {
-                    self.approval_manager.approve(&call_id, ApprovalScope::Always);
-                    self.state.approval = None;
+                (KeyCode::Right | KeyCode::Down | KeyCode::Tab, _) => {
+                    if let Some(request) = self.state.approval.as_mut() {
+                        request.choice = request.choice.next();
+                    }
+                    None
                 }
-                KeyCode::Char('n') | KeyCode::Esc => {
-                    self.approval_manager.resolve(
-                        &call_id,
-                        ToolApprovalResult::Denied {
-                            reason: "Denied by user".to_string(),
-                        },
-                    );
-                    self.state.approval = None;
-                }
-                _ => {}
+                (KeyCode::Enter, _) => self.state.approval.as_ref().map(|request| request.choice),
+                (_, Some('y')) => Some(ApprovalChoice::Once),
+                (_, Some('a')) => Some(ApprovalChoice::Always),
+                (_, Some('n')) | (KeyCode::Esc, _) => Some(ApprovalChoice::Deny),
+                _ => None,
+            };
+            if let Some(choice) = choice {
+                self.resolve_pending_approval(choice);
             }
             return false;
         }
 
         key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+    }
+
+    fn resolve_pending_approval(&mut self, choice: ApprovalChoice) {
+        let Some(request) = self.state.approval.take() else {
+            return;
+        };
+        match choice {
+            ApprovalChoice::Once => self.approval_manager.approve(&request.call_id, ApprovalScope::Once),
+            ApprovalChoice::Always => self.approval_manager.approve(&request.call_id, ApprovalScope::Always),
+            ApprovalChoice::Deny => self.approval_manager.resolve(
+                &request.call_id,
+                ToolApprovalResult::Denied {
+                    reason: "Denied by user".to_string(),
+                },
+            ),
+        }
     }
 
     fn deny_pending_approval(&mut self, reason: &str) {
@@ -544,6 +577,23 @@ impl TuiRuntime {
 
     fn draw(&self, terminal: &mut AppTerminal) -> anyhow::Result<()> {
         draw_synchronized(terminal, |frame| ui::render(frame, &self.state))
+    }
+
+    fn reflow_history(&mut self, terminal: &mut AppTerminal) -> anyhow::Result<()> {
+        let replayable_count = self.state.prepare_history_replay();
+        reset_inline_synchronized(terminal)?;
+        let width = terminal.size()?.width.saturating_sub(2).max(1);
+        let lines = if self.state.transcript.is_empty() && self.state.show_welcome {
+            self.state.show_welcome = false;
+            ui::welcome_history_lines(&self.state, width)
+        } else {
+            ui::history_prefix_lines(&self.state, replayable_count, width)
+        };
+        if !lines.is_empty() {
+            insert_history_lines(terminal, lines)?;
+        }
+        self.state.mark_transcript_prefix_committed(replayable_count);
+        clear_synchronized(terminal)
     }
 
     fn commit_pending_history(&mut self, terminal: &mut AppTerminal) -> anyhow::Result<()> {

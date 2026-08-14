@@ -1,5 +1,8 @@
+use aion_protocol::ToolApprovalResult;
 use aion_protocol::commands::SessionMode;
-use crossterm::event::{KeyCode, KeyEvent};
+use aion_protocol::events::ToolCategory;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use tokio::sync::oneshot;
 
 use super::{IdleAction, TuiMetadata, TuiOutcome, TuiRuntime, application_help, permission_mode, starts_conversation};
 use crate::event::AgentEvent;
@@ -31,6 +34,17 @@ fn session(id: &str) -> TuiSession {
         "2026-08-13 12:00 UTC".to_string(),
         2,
     )
+}
+
+fn request_approval(runtime: &mut TuiRuntime) -> oneshot::Receiver<ToolApprovalResult> {
+    let receiver = runtime.approval_manager.request_approval("call-1", &ToolCategory::Exec);
+    runtime.state.handle_agent_event(AgentEvent::ApprovalRequested {
+        call_id: "call-1".to_string(),
+        name: "shell".to_string(),
+        description: "Run a command".to_string(),
+        input: "cargo test".to_string(),
+    });
+    receiver
 }
 
 #[test]
@@ -111,4 +125,47 @@ fn help_contains_input_and_navigation_guidance() {
     assert!(output.contains("Shift+Enter   Insert newline"));
     assert!(output.contains("Mouse wheel   Scroll conversation"));
     assert!(output.contains("Drag          Select terminal text"));
+}
+
+#[test]
+fn approval_navigation_selects_always_and_confirms_with_enter() {
+    let mut runtime = runtime();
+    let mut receiver = request_approval(&mut runtime);
+
+    assert!(!runtime.handle_running_key(KeyEvent::from(KeyCode::Right)));
+    assert_eq!(
+        runtime.state.approval.as_ref().map(|request| request.choice),
+        Some(crate::state::ApprovalChoice::Always)
+    );
+    assert!(!runtime.handle_running_key(KeyEvent::from(KeyCode::Enter)));
+
+    assert!(matches!(receiver.try_recv(), Ok(ToolApprovalResult::Approved)));
+    assert!(runtime.state.approval.is_none());
+    assert!(runtime.approval_manager.is_auto_approved("exec"));
+}
+
+#[test]
+fn approval_shortcuts_accept_uppercase_characters() {
+    let mut runtime = runtime();
+    let mut receiver = request_approval(&mut runtime);
+
+    let key = KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT);
+    assert!(!runtime.handle_running_key(key));
+
+    assert!(matches!(receiver.try_recv(), Ok(ToolApprovalResult::Approved)));
+}
+
+#[test]
+fn control_c_during_approval_denies_the_request_and_cancels_the_turn() {
+    let mut runtime = runtime();
+    let mut receiver = request_approval(&mut runtime);
+
+    let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(runtime.handle_running_key(key));
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(ToolApprovalResult::Denied { reason }) if reason == "Turn cancelled by user"
+    ));
+    assert!(runtime.state.approval.is_none());
 }

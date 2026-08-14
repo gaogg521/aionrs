@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::markdown::{MarkdownTheme, render_markdown};
-use crate::state::AppState;
+use crate::state::{AppState, ApprovalChoice};
 use crate::transcript::{EntryKind, ToolStepStatus, TranscriptEntry};
 
 const MAX_COMPOSER_HEIGHT: u16 = 8;
@@ -126,6 +126,11 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
 pub(super) fn pending_history_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
     transcript_lines(state.pending_transcript(), width.max(1), state)
+}
+
+pub(super) fn history_prefix_lines(state: &AppState, count: usize, width: u16) -> Vec<Line<'static>> {
+    let count = count.min(state.transcript.len());
+    transcript_lines(&state.transcript[..count], width.max(1), state)
 }
 
 pub(super) struct StreamingHistoryCommit {
@@ -659,24 +664,72 @@ fn render_approval(frame: &mut Frame<'_>, bounds: Rect, state: &AppState) {
         return;
     };
     let width = bounds.width.saturating_sub(4).clamp(20, 88);
-    let height = bounds.height.saturating_sub(2).clamp(6, 12);
+    let height = bounds.height.saturating_sub(2).clamp(8, 14);
     let area = centered_rect(width, height, bounds);
     let description = if request.description.trim().is_empty() {
         "This tool needs your approval."
     } else {
         request.description.as_str()
     };
-    let content = format!("{}\n\n{}\n\n{}", request.name, description, request.input);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Tool approval ")
+        .border_style(warning(state));
+    let inner = block.inner(area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
+        .split(inner);
+    let body = Text::from(vec![
+        Line::from(Span::styled(
+            request.name.clone(),
+            normal(state).add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(description.to_string()),
+        Line::default(),
+        Line::from(Span::styled(request.input.clone(), muted(state))),
+    ]);
     frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), chunks[0]);
+    frame.render_widget(Paragraph::new(approval_actions(request.choice, inner.width)), chunks[1]);
     frame.render_widget(
-        Paragraph::new(content).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Tool approval ")
-                .border_style(warning(state)),
-        ),
-        area,
+        Paragraph::new(Line::from(Span::styled(
+            fit_line(" ←/→ select · Enter confirm · Esc deny", inner.width),
+            muted(state),
+        ))),
+        chunks[2],
     );
+}
+
+fn approval_actions(choice: ApprovalChoice, width: u16) -> Line<'static> {
+    let labels = if width >= 34 {
+        [
+            (ApprovalChoice::Once, " Allow once "),
+            (ApprovalChoice::Always, " Always allow "),
+            (ApprovalChoice::Deny, " Deny "),
+        ]
+    } else {
+        [
+            (ApprovalChoice::Once, " Once "),
+            (ApprovalChoice::Always, " Always "),
+            (ApprovalChoice::Deny, " Deny "),
+        ]
+    };
+    let mut spans = Vec::with_capacity(labels.len() * 2);
+    for (index, (action, label)) in labels.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let style = if choice == action {
+            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(label, style));
+    }
+    Line::from(spans).alignment(Alignment::Center)
 }
 
 fn centered_rect(width: u16, height: u16, bounds: Rect) -> Rect {

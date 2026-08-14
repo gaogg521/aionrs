@@ -1,4 +1,5 @@
 use aion_agent::commands::CommandSpec;
+use aion_types::compact::{CompactMetadata, CompactTrigger};
 use aion_types::message::{ContentBlock, Message, Role};
 
 use super::AppState;
@@ -31,6 +32,52 @@ fn resumed_history_is_rendered_by_role() {
     assert_eq!(state.transcript[1].kind, EntryKind::Assistant);
     assert!(state.transcript[0].label.is_empty());
     assert!(state.transcript[1].label.is_empty());
+}
+
+#[test]
+fn resumed_history_hides_compact_context_messages() {
+    let metadata = CompactMetadata {
+        trigger: CompactTrigger::Manual,
+        pre_compact_tokens: 42_000,
+        messages_summarized: 12,
+    };
+    let mut state = state();
+    state.set_history(&[
+        Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!(
+                    "[Conversation compacted]\n{}",
+                    serde_json::to_string(&metadata).unwrap()
+                ),
+            }],
+        ),
+        Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "This session is being continued from a previous conversation.\n\nSummary: internal summary"
+                    .to_string(),
+            }],
+        ),
+        Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "visible question".to_string(),
+            }],
+        ),
+        Message::new(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "visible answer".to_string(),
+            }],
+        ),
+    ]);
+
+    assert_eq!(state.transcript.len(), 2);
+    assert_eq!(state.transcript[0].kind, EntryKind::User);
+    assert_eq!(state.transcript[0].text, "visible question");
+    assert_eq!(state.transcript[1].kind, EntryKind::Assistant);
+    assert_eq!(state.transcript[1].text, "visible answer");
 }
 
 #[test]
@@ -184,6 +231,23 @@ fn streaming_deltas_append_to_one_assistant_entry() {
     state.handle_agent_event(AgentEvent::TextDelta("world".to_string()));
     assert_eq!(state.transcript.len(), 1);
     assert_eq!(state.transcript[0].text, "hello world");
+}
+
+#[test]
+fn history_replay_resets_stream_offsets_and_keeps_active_content_pending() {
+    let mut state = state();
+    state.begin_turn("question");
+    state.handle_agent_event(AgentEvent::TextDelta("first\n\nsecond".to_string()));
+    state.commit_streaming_prefix(1, "first\n\n".len());
+    assert_eq!(state.transcript[1].visible_text(), "second");
+
+    let replayable_count = state.prepare_history_replay();
+
+    assert_eq!(replayable_count, 1);
+    assert_eq!(state.committed_transcript, 0);
+    assert_eq!(state.transcript[1].visible_text(), "first\n\nsecond");
+    state.mark_transcript_prefix_committed(replayable_count);
+    assert_eq!(state.pending_transcript().len(), 1);
 }
 
 #[test]
