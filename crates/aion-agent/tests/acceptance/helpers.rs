@@ -93,6 +93,7 @@ pub fn openai_config(api_key: &str) -> Config {
         vertex: None,
         mcp: McpConfig::default(),
         logging: aion_config::logging::LoggingConfig::default(),
+        vision: None,
     }
 }
 
@@ -131,5 +132,6 @@ pub fn bedrock_config() -> Config {
         vertex: None,
         mcp: McpConfig::default(),
         logging: aion_config::logging::LoggingConfig::default(),
+        vision: None,
     }
 }

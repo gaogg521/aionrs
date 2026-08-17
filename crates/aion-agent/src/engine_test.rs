@@ -2868,6 +2868,48 @@ mod tests_tool_policy_enforcement {
         assert!(vision_request.tools.iter().any(|tool| tool.name == "ViewImage"));
     }
 
+    /// The central guarantee of the text-model image path: a model that cannot
+    /// see images still gets a tool that can read one. Registers the real
+    /// tools, not stand-ins, so a future change to either tool's capability
+    /// declaration breaks here.
+    #[test]
+    fn build_request_advertises_read_image_to_models_without_image_input() {
+        use aion_tools::read_image::ReadImageTool;
+        use aion_tools::view_image::ViewImageTool;
+
+        let mut engine = make_engine(Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        engine.tools.register(Box::new(ViewImageTool::new()));
+        engine.tools.register(Box::new(ReadImageTool::new("deepseek-v4-flash", None)));
+        engine.tool_policy = ToolPolicy::allow_only(["Read", "ViewImage", "ReadImage"]);
+        engine.compat.image_input = Some(ImageInputCapability::Unsupported);
+
+        let text_only_request = engine.build_request(TurnKind::Normal);
+        let tool_names: Vec<_> = text_only_request.tools.iter().map(|tool| tool.name.as_str()).collect();
+
+        assert!(
+            tool_names.contains(&"ReadImage"),
+            "text-only models must keep an image-reading tool, got {tool_names:?}"
+        );
+        assert!(!tool_names.contains(&"ViewImage"));
+    }
+
+    /// Plan mode narrows the tool list to read-only tools; reading an image is
+    /// read-only, so it must survive there too.
+    #[test]
+    fn plan_mode_keeps_read_image_for_models_without_image_input() {
+        use aion_tools::read_image::ReadImageTool;
+
+        let mut engine = make_engine(Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        engine.tools.register(Box::new(ReadImageTool::new("deepseek-v4-flash", None)));
+        engine.tool_policy = ToolPolicy::allow_only(["Read", "ReadImage"]);
+        engine.compat.image_input = Some(ImageInputCapability::Unsupported);
+        engine.plan_state.is_active = true;
+
+        let request = engine.build_request(TurnKind::Normal);
+
+        assert!(request.tools.iter().any(|tool| tool.name == "ReadImage"));
+    }
+
     #[tokio::test]
     async fn execute_tool_round_rejects_denied_tools_before_execution() {
         let read_executions = Arc::new(AtomicUsize::new(0));

@@ -112,6 +112,7 @@ fn stub_config(base_url: String) -> Config {
         vertex: None,
         mcp: McpConfig::default(),
         logging: aion_config::logging::LoggingConfig::default(),
+        vision: None,
     }
 }
 

@@ -93,6 +93,7 @@ mod tests {
             vertex,
             mcp: McpConfig::default(),
             logging: LoggingConfig::default(),
+            vision: None,
         }
     }
 

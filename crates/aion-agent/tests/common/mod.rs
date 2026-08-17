@@ -267,6 +267,7 @@ pub fn test_config() -> Config {
         vertex: None,
         mcp: McpConfig::default(),
         logging: aion_config::logging::LoggingConfig::default(),
+        vision: None,
     }
 }
 

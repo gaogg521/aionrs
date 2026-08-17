@@ -31,6 +31,7 @@ fn minimal_config() -> Config {
         vertex: None,
         mcp: Default::default(),
         logging: Default::default(),
+        vision: None,
     }
 }
 

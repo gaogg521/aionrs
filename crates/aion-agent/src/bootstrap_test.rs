@@ -5,9 +5,11 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use aion_config::config::{CliArgs, McpServerConfig, TransportType};
+    use aion_config::compat::ProviderCompat;
+    use aion_config::config::{CliArgs, McpServerConfig, ProviderType, TransportType, VisionModelConfig};
     use aion_protocol::events::ToolCategory;
     use aion_tools::Tool;
+    use aion_types::message::ImageInputCapability;
     use aion_types::tool::ToolResult;
     use async_trait::async_trait;
     use serde_json::{Value, json};
@@ -129,5 +131,72 @@ mod tests {
         assert!(allowed.content.contains("AllowedDeferred"));
         assert!(denied.content.starts_with("No deferred tools matching"));
         assert!(!denied.content.contains("\"name\": \"DeniedDeferred\""));
+    }
+
+    fn text_only_config() -> Config {
+        let mut config = test_config();
+        config.model = "deepseek-v4-flash".to_string();
+        config.compat.image_input = Some(ImageInputCapability::Unsupported);
+        config.vision = None;
+        config
+    }
+
+    fn vision_delegate() -> VisionModelConfig {
+        VisionModelConfig {
+            provider_label: "openai".to_string(),
+            provider: ProviderType::OpenAI,
+            api_key: "sk-vision".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4o".to_string(),
+            compat: ProviderCompat::openai_official_defaults(),
+        }
+    }
+
+    /// Registration must not be conditional on a vision model existing: without
+    /// the tool present the model has nothing to call and reports back to the
+    /// user by inventing the image contents.
+    #[test]
+    fn builtin_registry_registers_read_image_even_without_a_vision_model() {
+        let config = text_only_config();
+        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
+        let bootstrap = AgentBootstrap::new(config, "/tmp", output);
+        let provider = create_provider(bootstrap.config());
+
+        let registry = bootstrap.build_builtin_registry(Path::new("/tmp"), &provider);
+
+        assert!(registry.tool_names().iter().any(|name| name == "ReadImage"));
+    }
+
+    #[test]
+    fn vision_backend_is_absent_for_a_text_only_model_with_no_delegate() {
+        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
+        let bootstrap = AgentBootstrap::new(text_only_config(), "/tmp", output);
+        let provider = create_provider(bootstrap.config());
+
+        assert!(bootstrap.resolve_vision_backend(&provider).is_none());
+    }
+
+    #[test]
+    fn vision_backend_uses_the_configured_delegate_for_a_text_only_model() {
+        let mut config = text_only_config();
+        config.vision = Some(vision_delegate());
+        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
+        let bootstrap = AgentBootstrap::new(config, "/tmp", output);
+        let provider = create_provider(bootstrap.config());
+
+        assert!(bootstrap.resolve_vision_backend(&provider).is_some());
+    }
+
+    /// A vision-capable main model can read the image itself, so `ReadImage`
+    /// stays usable without any extra configuration.
+    #[test]
+    fn vision_backend_falls_back_to_a_vision_capable_main_model() {
+        let mut config = text_only_config();
+        config.compat.image_input = Some(ImageInputCapability::Supported);
+        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
+        let bootstrap = AgentBootstrap::new(config, "/tmp", output);
+        let provider = create_provider(bootstrap.config());
+
+        assert!(bootstrap.resolve_vision_backend(&provider).is_some());
     }
 }

@@ -7,10 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-aion-types.workspace    = true
-aion-protocol.workspace = true
-aion-config.workspace   = true
-aion-process.workspace  = true
+aion-types.workspace     = true
+aion-protocol.workspace  = true
+aion-config.workspace    = true
+aion-process.workspace   = true
+aion-providers.workspace = true
 
 tracing.workspace     = true
 tokio.workspace       = true

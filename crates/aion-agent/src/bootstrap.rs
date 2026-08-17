@@ -18,6 +18,7 @@ use aion_tools::file_cache::FileStateCache;
 use aion_tools::glob::GlobTool;
 use aion_tools::grep::GrepTool;
 use aion_tools::read::ReadTool;
+use aion_tools::read_image::{ReadImageTool, VisionBackend};
 use aion_tools::registry::ToolRegistry;
 use aion_tools::tool_search::ToolSearchTool;
 use aion_tools::view_image::ViewImageTool;
@@ -152,7 +153,7 @@ impl AgentBootstrap {
         let workspace = self.resolve_workspace_path();
         let provider = self.resolve_provider();
         let environment = self.resolve_environment(workspace)?;
-        let mut registry = self.build_builtin_registry(&environment.workspace);
+        let mut registry = self.build_builtin_registry(&environment.workspace, &provider);
 
         let builtin_names = registry.tool_names();
         let mcp = self.connect_mcp(&mut registry, &builtin_names).await;
@@ -204,7 +205,49 @@ impl AgentBootstrap {
         self.provider.take().unwrap_or_else(|| create_provider(&self.config))
     }
 
-    fn build_builtin_registry(&self, workspace_path: &Path) -> ToolRegistry {
+    /// Pick the vision model that `ReadImage` delegates to.
+    ///
+    /// A dedicated delegate wins over the main provider even when the main
+    /// model can see images: reusing the main model would spend its (usually
+    /// more expensive) tokens on a job the delegate was configured for.
+    ///
+    /// Nothing here decides *whether* a model has vision — it only reads the
+    /// capability that config resolution already established
+    /// (`compat.image_input`), which for the AionUi host is the model
+    /// allowlist.
+    fn resolve_vision_backend(&self, provider: &Arc<dyn LlmProvider>) -> Option<VisionBackend> {
+        if let Some(vision_config) = self.config.vision_model_config() {
+            info!(
+                target: "aion_agent",
+                vision_model = %vision_config.model,
+                vision_provider = %vision_config.provider_label,
+                "agent bootstrap: ReadImage delegating to a dedicated vision model",
+            );
+            let vision_provider = create_provider(&vision_config);
+            return Some(VisionBackend::new(
+                vision_provider,
+                vision_config.model,
+                vision_config.provider_label,
+            ));
+        }
+
+        if self.config.compat.image_input().supports_images() {
+            return Some(VisionBackend::new(
+                Arc::clone(provider),
+                self.config.model.clone(),
+                self.config.provider_label.clone(),
+            ));
+        }
+
+        info!(
+            target: "aion_agent",
+            model = %self.config.model,
+            "agent bootstrap: no vision-capable model available; ReadImage will report images as unreadable",
+        );
+        None
+    }
+
+    fn build_builtin_registry(&self, workspace_path: &Path, provider: &Arc<dyn LlmProvider>) -> ToolRegistry {
         let file_cache = self.build_file_cache();
         let mut registry = ToolRegistry::new();
 
@@ -218,6 +261,10 @@ impl AgentBootstrap {
         registry.register(Box::new(GrepTool::new(workspace_path.to_path_buf())));
         registry.register(Box::new(GlobTool::new(workspace_path.to_path_buf())));
         registry.register(Box::new(ViewImageTool::new()));
+        registry.register(Box::new(ReadImageTool::new(
+            self.config.model.clone(),
+            self.resolve_vision_backend(provider),
+        )));
 
         registry
     }

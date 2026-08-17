@@ -289,6 +289,43 @@ pub struct Config {
     pub vertex: Option<VertexConfig>,
     pub mcp: McpConfig,
     pub logging: LoggingConfig,
+    /// A vision-capable model the agent can delegate image reading to when the
+    /// main model itself cannot accept image input. See [`VisionModelConfig`].
+    pub vision: Option<VisionModelConfig>,
+}
+
+/// A separately configured, vision-capable model used to turn images into text.
+///
+/// Main models without image input cannot be handed an image, so the `ReadImage`
+/// tool delegates to this model and returns its textual answer. It is resolved
+/// either from the first `[providers.*]` entry whose compat declares
+/// `image_input = "supported"`, or injected by an embedding host (AionUi) that
+/// knows which of the user's configured models are vision capable.
+///
+/// This type never *decides* that a model has vision — it only carries a model
+/// that some existing capability check already classified as vision capable.
+#[derive(Debug, Clone)]
+pub struct VisionModelConfig {
+    pub provider_label: String,
+    pub provider: ProviderType,
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+    pub compat: ProviderCompat,
+}
+
+impl VisionModelConfig {
+    /// Capture an already-resolved [`Config`] as a vision delegate.
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            provider_label: config.provider_label.clone(),
+            provider: config.provider,
+            api_key: config.api_key.clone(),
+            base_url: config.base_url.clone(),
+            model: config.model.clone(),
+            compat: config.compat.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,12 +395,7 @@ impl Config {
             .base_url
             .clone()
             .or_else(|| provider_config.base_url.clone())
-            .unwrap_or_else(|| match provider {
-                ProviderType::Anthropic => "https://api.anthropic.com".into(),
-                ProviderType::OpenAI => "https://api.openai.com/v1".into(),
-                // Bedrock/Vertex URLs are constructed from region/project, not base_url
-                ProviderType::Bedrock | ProviderType::Vertex => String::new(),
-            });
+            .unwrap_or_else(|| default_base_url(provider));
         let base_url = normalize_base_url(provider, base_url);
 
         let model = cli
@@ -405,18 +437,13 @@ impl Config {
         // Resolve compat: provider-type defaults + user overrides. The
         // official OpenAI endpoint gets its own preset (newer models reject
         // the legacy `max_tokens` parameter).
-        let compat_defaults = match provider {
-            ProviderType::Anthropic => ProviderCompat::anthropic_defaults(),
-            ProviderType::OpenAI if is_openai_official_url(&base_url) => ProviderCompat::openai_official_defaults(),
-            ProviderType::OpenAI => ProviderCompat::openai_defaults(),
-            ProviderType::Bedrock => ProviderCompat::bedrock_defaults(),
-            ProviderType::Vertex => ProviderCompat::anthropic_defaults(),
-        };
+        let compat_defaults = compat_defaults_for(provider, &base_url);
 
         let user_compat = provider_config.compat.clone().unwrap_or_default();
 
         let compat = ProviderCompat::merge(compat_defaults, user_compat);
         let thinking = resolve_cli_thinking(cli.thinking.as_deref(), cli.thinking_budget)?;
+        let vision = resolve_vision_model(&merged.providers);
 
         Ok(Config {
             provider_label,
@@ -443,8 +470,103 @@ impl Config {
             vertex: merged.vertex,
             mcp: merged.mcp,
             logging: merged.logging,
+            vision,
         })
     }
+
+    /// Derive the provider-shaped config for [`Config::vision`].
+    ///
+    /// Transport-level settings that are not part of the provider identity
+    /// (Bedrock/Vertex credentials, shell, hooks, …) are inherited from `self`
+    /// so the delegate reaches the same infrastructure the main model does.
+    pub fn vision_model_config(&self) -> Option<Config> {
+        let vision = self.vision.as_ref()?;
+        let mut derived = self.clone();
+        derived.provider_label = vision.provider_label.clone();
+        derived.provider = vision.provider;
+        derived.api_key = vision.api_key.clone();
+        derived.base_url = vision.base_url.clone();
+        derived.model = vision.model.clone();
+        derived.compat = vision.compat.clone();
+        derived.prompt_caching = false;
+        derived.thinking = None;
+        derived.vision = None;
+        Some(derived)
+    }
+}
+
+fn default_base_url(provider: ProviderType) -> String {
+    match provider {
+        ProviderType::Anthropic => "https://api.anthropic.com".into(),
+        ProviderType::OpenAI => "https://api.openai.com/v1".into(),
+        // Bedrock/Vertex URLs are constructed from region/project, not base_url
+        ProviderType::Bedrock | ProviderType::Vertex => String::new(),
+    }
+}
+
+fn compat_defaults_for(provider: ProviderType, base_url: &str) -> ProviderCompat {
+    match provider {
+        ProviderType::Anthropic => ProviderCompat::anthropic_defaults(),
+        ProviderType::OpenAI if is_openai_official_url(base_url) => ProviderCompat::openai_official_defaults(),
+        ProviderType::OpenAI => ProviderCompat::openai_defaults(),
+        ProviderType::Bedrock => ProviderCompat::bedrock_defaults(),
+        ProviderType::Vertex => ProviderCompat::anthropic_defaults(),
+    }
+}
+
+/// Pick the vision delegate from the configured `[providers.*]` entries.
+///
+/// Selection reuses the existing capability declaration
+/// (`compat.image_input = "supported"`); it never infers vision support from a
+/// model name. Entries are visited in sorted name order so the choice is
+/// deterministic across runs.
+fn resolve_vision_model(providers: &HashMap<String, ProviderConfig>) -> Option<VisionModelConfig> {
+    let mut names = providers.keys().map(String::as_str).collect::<Vec<_>>();
+    names.sort_unstable();
+
+    for name in names {
+        let Some(entry) = providers.get(name) else {
+            continue;
+        };
+        let declares_vision = entry
+            .compat
+            .as_ref()
+            .and_then(|compat| compat.image_input)
+            .is_some_and(|capability| capability.supports_images());
+        if !declares_vision {
+            continue;
+        }
+        let Ok(resolved) = resolve_provider_alias(providers, name) else {
+            continue;
+        };
+        let provider = resolved.provider_type;
+        let effective = resolved.effective_config;
+        // A delegate is only usable with an explicit model id; falling back to
+        // the built-in default would silently pick a model the user never
+        // declared as vision capable.
+        let model = effective.model.clone().or_else(|| entry.model.clone())?;
+        let Ok(api_key) = resolve_api_key(None, effective.api_key.as_deref(), provider) else {
+            continue;
+        };
+        let base_url = normalize_base_url(
+            provider,
+            effective.base_url.clone().unwrap_or_else(|| default_base_url(provider)),
+        );
+        let compat = ProviderCompat::merge(
+            compat_defaults_for(provider, &base_url),
+            effective.compat.clone().unwrap_or_default(),
+        );
+        return Some(VisionModelConfig {
+            provider_label: name.to_owned(),
+            provider,
+            api_key,
+            base_url,
+            model,
+            compat,
+        });
+    }
+
+    None
 }
 
 const DEFAULT_THINKING_BUDGET: u32 = 10_000;

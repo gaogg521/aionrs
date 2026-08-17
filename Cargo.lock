@@ -237,6 +237,7 @@ dependencies = [
  "aion-config",
  "aion-process",
  "aion-protocol",
+ "aion-providers",
  "aion-types",
  "anyhow",
  "async-trait",

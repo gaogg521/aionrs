@@ -1,88 +1,18 @@
-use std::path::Path;
-
 use async_trait::async_trait;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
 use aion_protocol::events::ToolCategory;
-use aion_types::message::{ContentBlock, ImageUrl, extension_to_image_media_type};
+use aion_types::message::ContentBlock;
 use aion_types::tool::{JsonSchema, ToolResult};
 
+use crate::image_source::{image_path_argument, load_image_url};
 use crate::{Tool, ToolExecutionOutput};
-
-const MAX_IMAGE_SIZE_BYTES: u64 = 20 * 1024 * 1024;
-
-fn detect_image_media_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
 
 pub struct ViewImageTool;
 
 impl ViewImageTool {
     pub fn new() -> Self {
         Self
-    }
-
-    async fn load_image(&self, input: &Value) -> Result<ImageUrl, String> {
-        let file_path = input
-            .get("file_path")
-            .and_then(Value::as_str)
-            .filter(|path| !path.trim().is_empty())
-            .ok_or_else(|| "Missing required parameter: file_path".to_owned())?;
-        let path = Path::new(file_path);
-        if !path.is_absolute() {
-            return Err("file_path must be an absolute path".to_owned());
-        }
-
-        let extension = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .ok_or_else(|| "Image path must have a supported extension".to_owned())?;
-        let mime_type = extension_to_image_media_type(extension)
-            .ok_or_else(|| format!("Unsupported image extension: {extension}"))?;
-
-        let metadata = tokio::fs::metadata(path)
-            .await
-            .map_err(|error| format!("Failed to read image metadata: {error}"))?;
-        if !metadata.is_file() {
-            return Err("Image path is not a regular file".to_owned());
-        }
-        if metadata.len() > MAX_IMAGE_SIZE_BYTES {
-            return Err(format!("Image exceeds the {} byte size limit", MAX_IMAGE_SIZE_BYTES));
-        }
-
-        let bytes = tokio::fs::read(path)
-            .await
-            .map_err(|error| format!("Failed to read image: {error}"))?;
-        if bytes.len() as u64 > MAX_IMAGE_SIZE_BYTES {
-            return Err(format!("Image exceeds the {} byte size limit", MAX_IMAGE_SIZE_BYTES));
-        }
-        let detected_mime_type = detect_image_media_type(&bytes)
-            .ok_or_else(|| "File content is not a supported JPEG, PNG, GIF, or WebP image".to_owned())?;
-        if detected_mime_type != mime_type {
-            return Err(format!(
-                "Image content type {detected_mime_type} does not match extension type {mime_type}"
-            ));
-        }
-
-        let image_url = ImageUrl {
-            url: format!("data:{detected_mime_type};base64,{}", STANDARD.encode(bytes)),
-        };
-        image_url
-            .validate()
-            .map_err(|error| format!("Failed to prepare image input: {error}"))?;
-        Ok(image_url)
     }
 
     fn success_result(file_path: &str) -> ToolResult {
@@ -134,18 +64,23 @@ impl Tool for ViewImageTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let file_path = input.get("file_path").and_then(Value::as_str).unwrap_or("unknown");
-        match self.load_image(&input).await {
-            Ok(_) => Self::success_result(file_path),
+        match image_path_argument(&input) {
+            Ok(file_path) => match load_image_url(&file_path).await {
+                Ok(_) => Self::success_result(&file_path),
+                Err(error) => Self::error_result(error),
+            },
             Err(error) => Self::error_result(error),
         }
     }
 
     async fn execute_with_follow_up(&self, input: Value) -> ToolExecutionOutput {
-        let file_path = input.get("file_path").and_then(Value::as_str).unwrap_or("unknown");
-        match self.load_image(&input).await {
+        let file_path = match image_path_argument(&input) {
+            Ok(file_path) => file_path,
+            Err(error) => return Self::error_result(error).into(),
+        };
+        match load_image_url(&file_path).await {
             Ok(image_url) => ToolExecutionOutput {
-                result: Self::success_result(file_path),
+                result: Self::success_result(&file_path),
                 follow_up_blocks: vec![ContentBlock::Image { image_url }],
             },
             Err(error) => Self::error_result(error).into(),
