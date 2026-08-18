@@ -23,7 +23,10 @@ fn rewrites_verbatim_unc_prefix_to_a_real_unc_path() {
 
 #[test]
 fn leaves_ordinary_paths_untouched() {
-    assert_eq!(strip_verbatim_prefix(r"C:\Users\me\image.png"), r"C:\Users\me\image.png");
+    assert_eq!(
+        strip_verbatim_prefix(r"C:\Users\me\image.png"),
+        r"C:\Users\me\image.png"
+    );
     assert_eq!(strip_verbatim_prefix("/home/me/image.png"), "/home/me/image.png");
 }
 

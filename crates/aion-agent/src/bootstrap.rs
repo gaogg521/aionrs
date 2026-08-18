@@ -23,6 +23,8 @@ use aion_tools::registry::ToolRegistry;
 use aion_tools::tool_search::ToolSearchTool;
 use aion_tools::view_image::ViewImageTool;
 use aion_tools::write::WriteTool;
+use aion_types::message::TokenUsage;
+use aion_types::usage::DelegateUsageSink;
 use anyhow::Result;
 use tracing::info;
 
@@ -73,6 +75,9 @@ pub struct AgentBootstrap {
     resume_session: Option<Session>,
     runtime_env: Vec<(String, String)>,
     tool_policy: ToolPolicy,
+    /// Host-supplied explanation for why no vision delegate is available. See
+    /// [`Self::vision_unavailable_reason`].
+    vision_unavailable_reason: Option<String>,
 }
 
 struct BootstrapEnvironment {
@@ -110,7 +115,21 @@ impl AgentBootstrap {
             resume_session: None,
             runtime_env: Vec::new(),
             tool_policy: ToolPolicy::default(),
+            vision_unavailable_reason: None,
         }
+    }
+
+    /// Explain why `ReadImage` has no vision delegate, when the host knows a
+    /// reason more specific than "the user configured none" — e.g. a company
+    /// model policy that excludes every vision-capable model they have.
+    ///
+    /// Lives on the builder rather than in `Config` because only an embedding
+    /// host can know such a reason; the CLI resolves the delegate from config
+    /// alone. Without it the tool advises adding a vision model in Settings,
+    /// which for a policy refusal is both wrong and impossible to act on.
+    pub fn vision_unavailable_reason(mut self, reason: Option<String>) -> Self {
+        self.vision_unavailable_reason = reason;
+        self
     }
 
     /// Use a pre-created provider instead of creating one from config.
@@ -261,10 +280,11 @@ impl AgentBootstrap {
         registry.register(Box::new(GrepTool::new(workspace_path.to_path_buf())));
         registry.register(Box::new(GlobTool::new(workspace_path.to_path_buf())));
         registry.register(Box::new(ViewImageTool::new()));
-        registry.register(Box::new(ReadImageTool::new(
-            self.config.model.clone(),
-            self.resolve_vision_backend(provider),
-        )));
+        registry.register(Box::new(
+            ReadImageTool::new(self.config.model.clone(), self.resolve_vision_backend(provider))
+                .with_usage_sink(Arc::new(SinkDelegateUsage(Arc::clone(&self.output))))
+                .with_unavailable_reason(self.vision_unavailable_reason.clone()),
+        ));
 
         registry
     }
@@ -440,6 +460,20 @@ impl AgentBootstrap {
         engine.set_tool_policy(self.tool_policy);
         engine.set_prompt_usage(prompt_usage);
         engine
+    }
+}
+
+/// Routes a tool's delegated-model usage to whatever `OutputSink` the host
+/// installed.
+///
+/// Exists because `aion-tools` cannot depend on `aion-agent` (that would be a
+/// dependency cycle), so the tool takes the neutral `DelegateUsageSink` from
+/// `aion-types` and this adapts it here.
+struct SinkDelegateUsage(Arc<dyn OutputSink>);
+
+impl DelegateUsageSink for SinkDelegateUsage {
+    fn on_delegate_usage(&self, model: &str, usage: &TokenUsage) {
+        self.0.emit_delegate_usage(model, usage);
     }
 }
 

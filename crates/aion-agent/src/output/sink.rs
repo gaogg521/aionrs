@@ -1,3 +1,5 @@
+use aion_types::message::TokenUsage;
+
 /// Abstraction over output channels (terminal vs JSON stream protocol)
 pub trait OutputSink: Send + Sync {
     /// Stream text delta from LLM
@@ -25,6 +27,17 @@ pub trait OutputSink: Send + Sync {
         cache_creation_tokens: u64,
         cache_read_tokens: u64,
     );
+
+    /// Report the token usage of a model call a *tool* made on its own behalf
+    /// (today: `ReadImage`'s vision delegate).
+    ///
+    /// Separate from [`Self::emit_stream_end`] because it is a different model
+    /// than the session's, with its own rate — folding it into the turn total
+    /// would bill the session model for tokens it never spent.
+    ///
+    /// Defaults to dropping it: the terminal and JSON-protocol sinks have
+    /// nowhere to put it, and only an embedding host that meters spend cares.
+    fn emit_delegate_usage(&self, _model: &str, _usage: &TokenUsage) {}
 
     /// Display error
     fn emit_error(&self, msg: &str);

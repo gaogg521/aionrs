@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use aion_providers::{LlmProvider, ProviderError};
 use aion_types::llm::{LlmEvent, LlmRequest};
 use aion_types::message::{ContentBlock, StopReason, TokenUsage};
+use aion_types::usage::DelegateUsageSink;
 
 use super::{ReadImageTool, VisionBackend};
 use crate::Tool;
@@ -83,14 +84,19 @@ fn is_advertised_to_models_without_image_input() {
     let tool = ReadImageTool::new("deepseek-v4-flash", None);
 
     assert!(!tool.requires_image_input());
-    assert!(!tool.is_deferred(), "must be eagerly advertised, not hidden behind ToolSearch");
+    assert!(
+        !tool.is_deferred(),
+        "must be eagerly advertised, not hidden behind ToolSearch"
+    );
 }
 
 #[tokio::test]
 async fn returns_the_vision_models_description_as_text() {
     let directory = TempDir::new().expect("temp dir");
     let path = write_png(&directory);
-    let provider = Arc::new(ScriptedVisionProvider::replying("AVGO daily candles with MACD and KDJ panes."));
+    let provider = Arc::new(ScriptedVisionProvider::replying(
+        "AVGO daily candles with MACD and KDJ panes.",
+    ));
     let requests = provider.requests.clone();
     let tool = ReadImageTool::new(
         "deepseek-v4-flash",
@@ -122,7 +128,10 @@ async fn forwards_a_caller_supplied_focus_prompt() {
     let path = write_png(&directory);
     let provider = Arc::new(ScriptedVisionProvider::replying("12.34"));
     let requests = provider.requests.clone();
-    let tool = ReadImageTool::new("deepseek-v4-flash", Some(VisionBackend::new(provider, "gpt-4o", "openai")));
+    let tool = ReadImageTool::new(
+        "deepseek-v4-flash",
+        Some(VisionBackend::new(provider, "gpt-4o", "openai")),
+    );
 
     let result = tool
         .execute(json!({ "file_path": path, "prompt": "read the closing price" }))
@@ -130,9 +139,12 @@ async fn forwards_a_caller_supplied_focus_prompt() {
 
     assert!(!result.is_error);
     let requests = requests.lock().unwrap();
-    assert!(requests[0].messages[0].content.iter().any(
-        |block| matches!(block, ContentBlock::Text { text } if text == "read the closing price")
-    ));
+    assert!(
+        requests[0].messages[0]
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == "read the closing price"))
+    );
 }
 
 #[tokio::test]
@@ -143,7 +155,10 @@ async fn reports_an_actionable_error_when_no_vision_model_is_configured() {
 
     let result = tool.execute(json!({ "file_path": path })).await;
 
-    assert!(result.is_error, "silence here is what makes agents invent image contents");
+    assert!(
+        result.is_error,
+        "silence here is what makes agents invent image contents"
+    );
     assert!(!result.content.trim().is_empty());
     // Names the model that failed, where to fix it, and forbids fabrication.
     assert!(result.content.contains("deepseek-v4-flash"));
@@ -162,7 +177,10 @@ async fn an_empty_vision_response_is_an_error_not_an_empty_success() {
             usage: TokenUsage::default(),
         },
     ]));
-    let tool = ReadImageTool::new("deepseek-v4-flash", Some(VisionBackend::new(provider, "gpt-4o", "openai")));
+    let tool = ReadImageTool::new(
+        "deepseek-v4-flash",
+        Some(VisionBackend::new(provider, "gpt-4o", "openai")),
+    );
 
     let result = tool.execute(json!({ "file_path": path })).await;
 
@@ -178,7 +196,10 @@ async fn surfaces_a_vision_stream_error() {
     let provider = Arc::new(ScriptedVisionProvider::with_events(vec![LlmEvent::Error(
         "rate limited".to_owned(),
     )]));
-    let tool = ReadImageTool::new("deepseek-v4-flash", Some(VisionBackend::new(provider, "gpt-4o", "openai")));
+    let tool = ReadImageTool::new(
+        "deepseek-v4-flash",
+        Some(VisionBackend::new(provider, "gpt-4o", "openai")),
+    );
 
     let result = tool.execute(json!({ "file_path": path })).await;
 
@@ -192,7 +213,11 @@ async fn surfaces_an_unreachable_vision_provider() {
     let path = write_png(&directory);
     let tool = ReadImageTool::new(
         "deepseek-v4-flash",
-        Some(VisionBackend::new(Arc::new(UnreachableVisionProvider), "gpt-4o", "openai")),
+        Some(VisionBackend::new(
+            Arc::new(UnreachableVisionProvider),
+            "gpt-4o",
+            "openai",
+        )),
     );
 
     let result = tool.execute(json!({ "file_path": path })).await;
@@ -218,7 +243,10 @@ async fn accepts_the_verbatim_paths_the_host_injects() {
     let directory = TempDir::new().expect("temp dir");
     let path = write_png(&directory);
     let provider = Arc::new(ScriptedVisionProvider::replying("a chart"));
-    let tool = ReadImageTool::new("deepseek-v4-flash", Some(VisionBackend::new(provider, "gpt-4o", "openai")));
+    let tool = ReadImageTool::new(
+        "deepseek-v4-flash",
+        Some(VisionBackend::new(provider, "gpt-4o", "openai")),
+    );
 
     let result = tool
         .execute(json!({ "file_path": format!(r"\\?\{}", path.display()) }))
@@ -226,4 +254,128 @@ async fn accepts_the_verbatim_paths_the_host_injects() {
 
     assert!(!result.is_error, "{}", result.content);
     assert!(result.content.contains("a chart"));
+}
+
+/// Records what a host meter would have been told.
+#[derive(Default)]
+struct RecordingUsageSink(Mutex<Vec<(String, TokenUsage)>>);
+
+impl DelegateUsageSink for RecordingUsageSink {
+    fn on_delegate_usage(&self, model: &str, usage: &TokenUsage) {
+        self.0.lock().unwrap().push((model.to_owned(), usage.clone()));
+    }
+}
+
+/// The delegate is a second billable model call. Before this, its `Done`
+/// event was matched as `LlmEvent::Done { .. } => break` and the usage was
+/// dropped on the floor — invisible to every spend cap and usage dashboard.
+#[tokio::test]
+async fn reports_the_delegate_calls_token_usage_to_the_host() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = write_png(&directory);
+    let provider = Arc::new(ScriptedVisionProvider::with_events(vec![
+        LlmEvent::TextDelta("a bar chart".to_owned()),
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 1_234,
+                output_tokens: 56,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 7,
+            },
+        },
+    ]));
+    let sink = Arc::new(RecordingUsageSink::default());
+    let tool = ReadImageTool::new(
+        "deepseek-v4-flash",
+        Some(VisionBackend::new(provider, "kimi-k2-6", "moonshot")),
+    )
+    .with_usage_sink(sink.clone());
+
+    let result = tool.execute(json!({ "file_path": path })).await;
+
+    assert!(!result.is_error, "{}", result.content);
+    let recorded = sink.0.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "exactly one delegate call was made");
+    assert_eq!(
+        recorded[0].0, "kimi-k2-6",
+        "usage must be attributed to the model that was actually billed, not the session model"
+    );
+    assert_eq!(recorded[0].1.input_tokens, 1_234);
+    assert_eq!(recorded[0].1.output_tokens, 56);
+    assert_eq!(recorded[0].1.cache_read_tokens, 7);
+}
+
+/// A failed delegate call cost nothing to report — and must not invent a zero
+/// row that would read as "this call was free".
+#[tokio::test]
+async fn reports_no_usage_when_the_delegate_could_not_be_reached() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = write_png(&directory);
+    let sink = Arc::new(RecordingUsageSink::default());
+    let tool = ReadImageTool::new(
+        "deepseek-v4-flash",
+        Some(VisionBackend::new(
+            Arc::new(UnreachableVisionProvider),
+            "kimi-k2-6",
+            "moonshot",
+        )),
+    )
+    .with_usage_sink(sink.clone());
+
+    let result = tool.execute(json!({ "file_path": path })).await;
+
+    assert!(result.is_error);
+    assert!(sink.0.lock().unwrap().is_empty());
+}
+
+/// When the host knows the delegate was refused by company policy, the generic
+/// "add a vision model in Settings" advice is wrong — the member cannot act on
+/// it. The refusal must be stated instead, and the anti-fabrication
+/// instruction must survive either way.
+#[tokio::test]
+async fn prefers_a_host_supplied_reason_over_the_generic_advice() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = write_png(&directory);
+    let tool = ReadImageTool::new("deepseek-v4-flash", None).with_unavailable_reason(Some(
+        "Your organization's model policy does not allow the vision-capable model(s) configured here (gpt-4o). Ask \
+         an administrator to add one to the allowed models list."
+            .to_owned(),
+    ));
+
+    let result = tool.execute(json!({ "file_path": path })).await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("administrator"));
+    assert!(
+        !result.content.contains("Settings -> Models"),
+        "the generic remedy must be replaced, not appended: {}",
+        result.content
+    );
+    assert!(
+        !result
+            .content
+            .contains("no other configured model is marked as supporting images")
+            && !result
+                .content
+                .contains("No other configured model is marked as supporting images"),
+        "that diagnosis is false here — a vision model exists, it was refused: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("Do NOT guess"),
+        "the anti-fabrication instruction is not optional"
+    );
+}
+
+/// An empty/whitespace reason is not a reason; fall back to the advice.
+#[tokio::test]
+async fn ignores_a_blank_host_supplied_reason() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = write_png(&directory);
+    let tool = ReadImageTool::new("deepseek-v4-flash", None).with_unavailable_reason(Some("   ".to_owned()));
+
+    let result = tool.execute(json!({ "file_path": path })).await;
+
+    assert!(result.content.contains("Settings -> Models"));
 }

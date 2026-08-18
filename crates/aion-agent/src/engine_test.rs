@@ -2879,7 +2879,9 @@ mod tests_tool_policy_enforcement {
 
         let mut engine = make_engine(Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         engine.tools.register(Box::new(ViewImageTool::new()));
-        engine.tools.register(Box::new(ReadImageTool::new("deepseek-v4-flash", None)));
+        engine
+            .tools
+            .register(Box::new(ReadImageTool::new("deepseek-v4-flash", None)));
         engine.tool_policy = ToolPolicy::allow_only(["Read", "ViewImage", "ReadImage"]);
         engine.compat.image_input = Some(ImageInputCapability::Unsupported);
 
@@ -2900,7 +2902,9 @@ mod tests_tool_policy_enforcement {
         use aion_tools::read_image::ReadImageTool;
 
         let mut engine = make_engine(Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        engine.tools.register(Box::new(ReadImageTool::new("deepseek-v4-flash", None)));
+        engine
+            .tools
+            .register(Box::new(ReadImageTool::new("deepseek-v4-flash", None)));
         engine.tool_policy = ToolPolicy::allow_only(["Read", "ReadImage"]);
         engine.compat.image_input = Some(ImageInputCapability::Unsupported);
         engine.plan_state.is_active = true;

@@ -22,6 +22,7 @@ use aion_providers::LlmProvider;
 use aion_types::llm::{LlmEvent, LlmRequest};
 use aion_types::message::{ContentBlock, Message, Role};
 use aion_types::tool::{JsonSchema, ToolResult};
+use aion_types::usage::DelegateUsageSink;
 
 use crate::Tool;
 use crate::image_source::{image_path_argument, load_image_url};
@@ -62,6 +63,15 @@ pub struct ReadImageTool {
     /// so the user knows which model could not read the image.
     main_model: String,
     vision: Option<VisionBackend>,
+    /// Where the delegate call's token usage is reported. `None` means nobody
+    /// is metering (the CLI); the delegate still runs, its cost is just not
+    /// accounted anywhere.
+    usage_sink: Option<Arc<dyn DelegateUsageSink>>,
+    /// Why no delegate is available, when the host knows a reason more specific
+    /// than "none configured" — e.g. a company policy that excludes every
+    /// vision-capable model the user has. Preferred over the generic advice,
+    /// which in that case tells the user to do something they cannot do.
+    unavailable_reason: Option<String>,
 }
 
 impl ReadImageTool {
@@ -69,7 +79,23 @@ impl ReadImageTool {
         Self {
             main_model: main_model.into(),
             vision,
+            usage_sink: None,
+            unavailable_reason: None,
         }
+    }
+
+    /// Report the delegate's token usage to `sink`. Without one, the call is
+    /// invisible to any spend accounting the host does.
+    pub fn with_usage_sink(mut self, sink: Arc<dyn DelegateUsageSink>) -> Self {
+        self.usage_sink = Some(sink);
+        self
+    }
+
+    /// Override the "no vision model" advice with a host-supplied reason.
+    /// Ignored when it is empty.
+    pub fn with_unavailable_reason(mut self, reason: Option<String>) -> Self {
+        self.unavailable_reason = reason.filter(|r| !r.trim().is_empty());
+        self
     }
 
     /// The message shown when no vision-capable model is reachable.
@@ -78,14 +104,22 @@ impl ReadImageTool {
     /// empty tool result is exactly what makes an agent fabricate a description
     /// of an image it never saw.
     fn no_vision_model_error(&self, file_path: &str) -> ToolResult {
+        // A host-supplied reason replaces the whole diagnosis-and-remedy middle
+        // section, not just the remedy: the default diagnosis asserts that no
+        // configured model is marked as supporting images, which is false when
+        // one exists and was merely refused. The "do not invent" instruction is
+        // the whole point of this message and stays on every path.
+        const DEFAULT_CAUSE: &str = "No other configured model is marked as supporting images.\n\
+                                     To fix this, open Settings -> Models, add or enable a model that accepts images \
+                                     (for example gpt-4o, claude-sonnet-4, gemini-2.5-pro, qwen-vl-max or glm-4v), \
+                                     then send the image again. If a vision model is already configured, open its \
+                                     model settings and set image input to \"supported\".";
+        let cause = self.unavailable_reason.as_deref().unwrap_or(DEFAULT_CAUSE);
         ToolResult {
             content: format!(
                 "Cannot read '{file_path}': no vision-capable model is available in this session.\n\
-                 The active model '{}' does not accept image input, and no other configured model is marked as \
-                 supporting images.\n\
-                 To fix this, open Settings -> Models, add or enable a model that accepts images (for example \
-                 gpt-4o, claude-sonnet-4, gemini-2.5-pro, qwen-vl-max or glm-4v), then send the image again. If a \
-                 vision model is already configured, open its model settings and set image input to \"supported\".\n\
+                 The active model '{}' does not accept image input.\n\
+                 {cause}\n\
                  Until then the contents of this image are unknown. Tell the user that image reading is unavailable \
                  and why. Do NOT guess, infer from the file name, or invent what the image shows.",
                 self.main_model
@@ -133,7 +167,16 @@ impl ReadImageTool {
                 LlmEvent::Error(error) => {
                     return Err(format!("Vision model '{}' returned an error: {error}", vision.model));
                 }
-                LlmEvent::Done { .. } => break,
+                // The delegate's cost is real and belongs to whoever meters
+                // this session. Dropping it here — which is what this arm used
+                // to do — makes a second, billable model call invisible to
+                // every spend cap and usage dashboard.
+                LlmEvent::Done { usage, .. } => {
+                    if let Some(sink) = self.usage_sink.as_ref() {
+                        sink.on_delegate_usage(&vision.model, &usage);
+                    }
+                    break;
+                }
                 _ => {}
             }
         }
