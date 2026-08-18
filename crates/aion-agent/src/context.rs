@@ -91,7 +91,14 @@ ONLY to load the schema of the small set of tools explicitly marked \
 \"(Deferred)\" in their description — nothing else. \
  - To run a skill, call the Skill tool with the skill name as the `skill` \
 argument (e.g. Skill(skill=\"officecli-financial-model\")). Never ToolSearch \
-for a skill; skills are not tools and will never appear in ToolSearch results."
+for a skill; skills are not tools and will never appear in ToolSearch results.
+ - If a tool reports it cannot do something — a missing capability, an \
+unavailable dependency, an unsupported input — do not stop there and report \
+the limitation to the user. First spend a genuine attempt on reaching the \
+same goal another way with the tools you have (e.g. ExecCommand plus a \
+platform feature, a different tool, a skill). Only tell the user something \
+is not possible after that attempt has actually failed, and say what you \
+tried."
             .to_string();
     }
 
@@ -133,6 +140,11 @@ for a skill; skills are not tools and will never appear in ToolSearch results."
                 .to_string(),
         );
     }
+
+    guidance.push(
+        " - If a tool reports it cannot do something, do not stop there and report the limitation to the user. First spend a genuine attempt on reaching the same goal another way with the tools available to you. Only tell the user something is not possible after that attempt has actually failed, and say what you tried."
+            .to_string(),
+    );
 
     guidance.join("\n")
 }

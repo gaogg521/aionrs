@@ -105,6 +105,43 @@ mod tests {
     }
 
     #[test]
+    fn test_unrestricted_tool_guidance_tells_the_agent_to_try_alternatives_before_giving_up() {
+        // Regression guard: a text-only model that hits ReadImage's "no vision
+        // model configured" error relayed that limitation straight to the user
+        // instead of first trying anything else (e.g. shelling out to a local
+        // OCR tool) — even though it had ExecCommand available and, once asked
+        // to, wrote a working PowerShell OCR script on its own. Without explicit
+        // encouragement, the model's default is to report failure, not explore.
+        let guidance = tool_usage_guidance(&ToolPolicy::Unrestricted);
+
+        assert!(
+            guidance.contains("reports it cannot do something"),
+            "unrestricted tool guidance should tell the agent to try alternatives before reporting a tool's limitation to the user: {guidance}"
+        );
+        assert!(
+            guidance
+                .to_lowercase()
+                .contains("only tell the user something is not possible"),
+            "guidance should require an actual attempt before concluding something is impossible: {guidance}"
+        );
+    }
+
+    #[test]
+    fn test_restricted_tool_guidance_also_tells_the_agent_to_try_alternatives() {
+        // The resourcefulness instruction must not be Unrestricted-only — a
+        // restricted policy still has *some* tools, and giving up at the first
+        // "I can't" is the same failure mode regardless of which tools are
+        // authorized.
+        let policy = ToolPolicy::allow_only(["Read"]);
+        let guidance = tool_usage_guidance(&policy);
+
+        assert!(
+            guidance.contains("reports it cannot do something"),
+            "restricted tool guidance should also encourage trying alternatives: {guidance}"
+        );
+    }
+
+    #[test]
     fn test_compact_messages_preserves_first_and_last() {
         // Build 8 messages (indices 0–7); keep_tail = 3
         let mut messages: Vec<Message> = (0..8)
